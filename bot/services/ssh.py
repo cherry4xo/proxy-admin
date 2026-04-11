@@ -99,9 +99,10 @@ class SSHClient:
         private_key = ""
         public_key = ""
         for line in stdout.splitlines():
-            if "Private key:" in line:
+            lower = line.lower()
+            if "privatekey:" in lower or "private key:" in lower:
                 private_key = line.split(":", 1)[1].strip()
-            elif "Public key:" in line:
+            elif "publickey:" in lower or "public key:" in lower or "password (publickey):" in lower:
                 public_key = line.split(":", 1)[1].strip()
         if not private_key or not public_key:
             raise RuntimeError(f"Failed to parse x25519 output:\n{stdout}\n{stderr}")
