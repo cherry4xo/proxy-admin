@@ -705,15 +705,25 @@ async def fsm_setup_node_id(message: Message, state: FSMContext, deps: Deps) -> 
         parse_mode="HTML",
     )
     try:
-        await deps.node_service.setup_node(node_id)
-        await message.answer(
-            f"Xray установлен на <b>{node.name}</b>!\n\n"
-            "Следующий шаг:\n"
-            "1. Нажми 🔑 Задать X25519 ключи (если нода импортирована)\n"
-            "2. Нажми 🔁 Передеплоить конфиг",
-            reply_markup=back_keyboard(),
-            parse_mode="HTML",
-        )
+        result_node = await deps.node_service.setup_node(node_id)
+        if result_node.role == "exit" and result_node.x25519_public:
+            await message.answer(
+                f"Xray установлен на <b>{result_node.name}</b>!\n\n"
+                f"X25519 ключи сгенерированы автоматически:\n"
+                f"Public key: <code>{result_node.x25519_public}</code>\n\n"
+                "Следующий шаг:\n"
+                "Нажми 🔁 Передеплоить конфиг",
+                reply_markup=back_keyboard(),
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                f"Xray установлен на <b>{result_node.name}</b>!\n\n"
+                "Следующий шаг:\n"
+                "Нажми 🔁 Передеплоить конфиг",
+                reply_markup=back_keyboard(),
+                parse_mode="HTML",
+            )
     except Exception as e:
         logger.exception("Failed to setup node %d", node_id)
         await message.answer(

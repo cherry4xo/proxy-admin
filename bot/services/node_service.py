@@ -97,7 +97,7 @@ class NodeService:
             raise ValueError("No SSH key found. Start the bot first to generate one.")
         return key.public_key
 
-    async def setup_node(self, node_id: int) -> str:
+    async def setup_node(self, node_id: int) -> Node:
         async with self._session_factory() as session:
             result = await session.execute(select(Node).where(Node.id == node_id))
             node = result.scalar_one_or_none()
@@ -109,9 +109,19 @@ class NodeService:
             ssh_key = key_result.scalar_one()
 
         ssh = self._make_ssh_client(node, ssh_key)
-        output = await ssh.setup_xray(api_port=node.xray_api_port)
-        logger.info("Node %d setup complete", node_id)
-        return output
+        await ssh.setup_xray(api_port=node.xray_api_port)
+        logger.info("Node %d xray installed", node_id)
+
+        if node.role == "exit":
+            x25519_priv, x25519_pub = await ssh.generate_x25519()
+            node = await self.set_node_x25519(
+                node_id=node_id,
+                x25519_private=x25519_priv,
+                x25519_public=x25519_pub,
+            )
+            logger.info("Node %d x25519 keys generated and saved", node_id)
+
+        return node
 
     async def set_node_x25519(
         self,

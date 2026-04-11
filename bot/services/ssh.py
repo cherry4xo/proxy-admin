@@ -94,6 +94,19 @@ class SSHClient:
                     await f.write(content)
         logger.info("Uploaded file to %s:%s", self._host, remote_path)
 
+    async def generate_x25519(self) -> tuple[str, str]:
+        stdout, stderr = await self.run_command("/opt/xray/xray x25519")
+        private_key = ""
+        public_key = ""
+        for line in stdout.splitlines():
+            if "Private key:" in line:
+                private_key = line.split(":", 1)[1].strip()
+            elif "Public key:" in line:
+                public_key = line.split(":", 1)[1].strip()
+        if not private_key or not public_key:
+            raise RuntimeError(f"Failed to parse x25519 output:\n{stdout}\n{stderr}")
+        return private_key, public_key
+
     async def setup_xray(self, api_port: int = 8080) -> str:
         script = _XRAY_SETUP_SCRIPT.format(api_port=api_port)
         stdout, stderr = await self.run_command(script)
