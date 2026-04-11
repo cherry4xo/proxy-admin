@@ -11,5 +11,7 @@ services:
     volumes:
       - ./proxy.db:/app/proxy.db
       - ./scripts:/app/scripts:ro
+      - ./sa-key.json:/app/sa-key.json:ro
     environment:
       - PYTHONUNBUFFERED=1
+      - DATABASE_URL=sqlite+aiosqlite:////app/proxy.db
