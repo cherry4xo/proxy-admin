@@ -14,7 +14,7 @@ _DOCKER_START_CMD = (
     "  -p 443:443 -p 8080:8080 "
     "  teddysun/xray:latest"
 )
-_SYSTEMD_START_CMD = "systemctl is-active --quiet xray && systemctl restart xray || systemctl start xray"
+_SYSTEMD_START_CMD = "systemctl is-active --quiet xray && systemctl reload-or-restart xray || systemctl start xray"
 
 _XRAY_SETUP_SCRIPT = """\
 set -euo pipefail
@@ -49,6 +49,7 @@ After=network.target
 
 [Service]
 ExecStart=/opt/xray/xray run -c /opt/xray/conf/config.json
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65535

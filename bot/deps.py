@@ -45,7 +45,10 @@ def build_deps() -> Deps:
         yandex=yandex,
         session_factory=async_session_factory,
     )
-    user_service = UserService(session_factory=async_session_factory)
+    user_service = UserService(
+        session_factory=async_session_factory,
+        node_service=node_service,
+    )
     return Deps(
         node_service=node_service,
         user_service=user_service,

@@ -73,8 +73,16 @@ def mock_xray(mocker) -> XrayApiClient:
 
 
 @pytest.fixture()
-def service(session_factory, mocker, mock_xray: XrayApiClient) -> UserService:
-    svc = UserService(session_factory=session_factory)
+def mock_node_service(mocker):
+    from bot.services.node_service import NodeService
+    svc = mocker.Mock(spec=NodeService)
+    svc.redeploy_node = mocker.AsyncMock()
+    return svc
+
+
+@pytest.fixture()
+def service(session_factory, mocker, mock_xray: XrayApiClient, mock_node_service) -> UserService:
+    svc = UserService(session_factory=session_factory, node_service=mock_node_service)
     mocker.patch.object(svc, "_make_xray_client", return_value=mock_xray)
     return svc
 
@@ -87,13 +95,13 @@ def _make_scalar_result(mocker, value):
 
 
 @pytest.mark.asyncio
-async def test_create_user_calls_xray_and_saves_user(
+async def test_create_user_saves_user_and_redeploys(
     service: UserService,
     session_factory,
     mock_session,
     exit_node: Node,
     ssh_key: SSHKey,
-    mock_xray: XrayApiClient,
+    mock_node_service,
     mocker,
 ):
     mock_session.execute.side_effect = [
@@ -107,7 +115,7 @@ async def test_create_user_calls_xray_and_saves_user(
 
     user, vless_url, qr_bytes = await service.create_user(name="alice", exit_node_id=10)
 
-    mock_xray.add_user.assert_called_once_with("inbound-vless", user.uuid)
+    mock_node_service.redeploy_node.assert_called_once_with(10)
     assert "1.2.3.4" in vless_url
     assert len(qr_bytes) > 0
 

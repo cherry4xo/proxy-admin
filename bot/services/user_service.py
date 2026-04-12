@@ -1,5 +1,6 @@
 import io
 import logging
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 import qrcode
@@ -13,12 +14,20 @@ from bot.services.keygen import generate_uuid
 from bot.services.ssh import SSHClient
 from bot.services.xray_api import XrayApiClient
 
+if TYPE_CHECKING:
+    from bot.services.node_service import NodeService
+
 logger = logging.getLogger(__name__)
 
 
 class UserService:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        node_service: "NodeService | None" = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._node_service = node_service
 
     def _build_vless_url(
         self,
@@ -92,8 +101,6 @@ class UserService:
             ssh_key = key_result.scalar_one()
 
         user_uuid = generate_uuid()
-        xray = self._make_xray_client(exit_node, ssh_key)
-        await xray.add_user("inbound-vless", user_uuid)
 
         async with self._session_factory() as session:
             user = User(
@@ -106,6 +113,9 @@ class UserService:
             session.add(user)
             await session.commit()
             await session.refresh(user)
+
+        if self._node_service:
+            await self._node_service.redeploy_node(exit_node_id)
 
         vless_url = self._build_vless_url(
             user_uuid=user_uuid,
@@ -165,3 +175,6 @@ class UserService:
             else:
                 user.is_active = False
             await session.commit()
+
+        if self._node_service:
+            await self._node_service.redeploy_node(exit_node.id)
