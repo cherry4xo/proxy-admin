@@ -31,6 +31,9 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="⚙️ Сетап ноды (установить Xray)", callback_data="node:setup"),
         InlineKeyboardButton(text="🔐 Публичный ключ бота", callback_data="node:bot_pubkey"),
     )
+    builder.row(
+        InlineKeyboardButton(text="📄 Загрузить свой конфиг", callback_data="node:upload_config"),
+    )
 
     # --- Ноды: мониторинг ---
     builder.row(InlineKeyboardButton(text="--- Ноды: мониторинг ---", callback_data="noop"))

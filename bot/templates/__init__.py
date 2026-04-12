@@ -22,6 +22,8 @@ def render_exit_node_config(
     xhttp_host: str = "",
 ) -> str:
     tpl = _env.get_template("exit_node.json.j2")
+    # xhttp_host: явный параметр > SNI (для XHTTP: host должен совпадать с SNI)
+    effective_host = xhttp_host or reality_sni
     return tpl.render(
         clients=clients,
         x25519_private=x25519_private,
@@ -29,7 +31,7 @@ def render_exit_node_config(
         reality_sni=reality_sni,
         xray_api_port=xray_api_port,
         xhttp_path=xhttp_path,
-        xhttp_host=xhttp_host or reality_sni,
+        xhttp_host=effective_host,
     )
 
 
@@ -44,6 +46,7 @@ def render_bridge_node_config(
     xhttp_host: str = "",
 ) -> str:
     tpl = _env.get_template("bridge_node.json.j2")
+    effective_host = xhttp_host or reality_sni
     return tpl.render(
         clients=clients,
         exit_node_ip=exit_node_ip,
@@ -52,5 +55,5 @@ def render_bridge_node_config(
         short_id=short_id,
         reality_sni=reality_sni,
         xhttp_path=xhttp_path,
-        xhttp_host=xhttp_host or reality_sni,
+        xhttp_host=effective_host,
     )

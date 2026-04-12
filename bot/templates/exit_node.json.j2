@@ -32,7 +32,7 @@
           "show": false,
           "dest": "{{ reality_sni }}:443",
           "xver": 0,
-          "serverNames": ["{{ reality_sni }}", "www.{{ reality_sni }}"],
+          "serverNames": ["{{ reality_sni }}"{% if not reality_sni.startswith('www.') %}, "www.{{ reality_sni }}"{% endif %}],
           "privateKey": "{{ x25519_private }}",
           "shortIds": [{% for sid in short_ids %}"{{ sid }}"{% if not loop.last %}, {% endif %}{% endfor %}]
         },

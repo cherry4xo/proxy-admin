@@ -1,3 +1,4 @@
+import json
 import logging
 from typing import Any
 
@@ -52,6 +53,11 @@ class SetX25519FSM(StatesGroup):
 
 class SetupNodeFSM(StatesGroup):
     node_id = State()
+
+
+class UploadConfigFSM(StatesGroup):
+    node_id = State()
+    config_json = State()
 
 
 @router.callback_query(F.data == "node:list_db")
@@ -729,6 +735,97 @@ async def fsm_setup_node_id(message: Message, state: FSMContext, deps: Deps) -> 
         await message.answer(
             f"Ошибка сетапа:\n<code>{e}</code>\n\n"
             "Убедись что публичный ключ бота добавлен в authorized_keys.",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(F.data == "node:upload_config")
+async def cb_upload_config_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID ноды для загрузки конфига:",
+        reply_markup=back_keyboard(),
+    )
+    await state.set_state(UploadConfigFSM.node_id)
+    await callback.answer()
+
+
+@router.message(UploadConfigFSM.node_id)
+async def fsm_upload_config_node_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    try:
+        node_id = int(message.text or "")
+    except ValueError:
+        await message.answer("Введите числовой ID:")
+        return
+
+    node = await deps.node_service.get_node(node_id)
+    if not node:
+        await message.answer("Нода не найдена.", reply_markup=back_keyboard())
+        await state.clear()
+        return
+
+    await state.update_data(node_id=node_id)
+    await state.set_state(UploadConfigFSM.config_json)
+    await message.answer(
+        f"Нода: <b>{node.name}</b> (<code>{node.ip}</code>)\n\n"
+        "Отправь <code>config.json</code> — файлом или текстом сообщения.\n\n"
+        "<b>Внимание:</b> конфиг будет задеплоен как есть, без валидации.",
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+
+
+@router.message(UploadConfigFSM.config_json)
+async def fsm_upload_config_json(message: Message, state: FSMContext, deps: Deps) -> None:
+    config_text: str | None = None
+
+    if message.document:
+        if not message.document.file_name or not message.document.file_name.endswith(".json"):
+            await message.answer("Отправь файл с расширением .json:")
+            return
+        file = await message.bot.get_file(message.document.file_id)  # type: ignore[union-attr]
+        content = await message.bot.download_file(file.file_path)  # type: ignore[union-attr]
+        config_text = content.read().decode("utf-8")  # type: ignore[union-attr]
+    elif message.text:
+        config_text = message.text
+    else:
+        await message.answer("Отправь JSON файлом или текстом:")
+        return
+
+    try:
+        json.loads(config_text)
+    except json.JSONDecodeError as e:
+        await message.answer(
+            f"Невалидный JSON:\n<code>{e}</code>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    node_id = data["node_id"]
+    await state.clear()
+
+    node = await deps.node_service.get_node(node_id)
+    if not node:
+        await message.answer("Нода не найдена.", reply_markup=back_keyboard())
+        return
+
+    await message.answer(f"Деплою конфиг на <b>{node.name}</b>...", parse_mode="HTML")
+
+    try:
+        await deps.node_service.deploy_custom_config(node_id, config_text)
+
+        await message.answer(
+            f"Конфиг задеплоен на <b>{node.name}</b>.",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Failed to upload config to node %d", node_id)
+        await message.answer(
+            f"Ошибка деплоя:\n<code>{e}</code>",
             reply_markup=back_keyboard(),
             parse_mode="HTML",
         )

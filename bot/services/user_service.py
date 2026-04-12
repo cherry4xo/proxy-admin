@@ -28,18 +28,22 @@ class UserService:
         short_id: str,
         reality_sni: str,
         remark: str,
+        xhttp_host: str = "",
+        xhttp_path: str = "/xhttptransmissionpath",
         port: int = 443,
     ) -> str:
+        first_short_id = short_id.split(",")[0] if "," in short_id else short_id
+        effective_host = xhttp_host or reality_sni
         params = "&".join([
             "encryption=none",
-            "flow=xtls-rprx-vision",
             "security=reality",
             f"sni={reality_sni}",
             "fp=chrome",
             f"pbk={x25519_public}",
-            f"sid={short_id}",
+            f"sid={first_short_id}",
             "type=xhttp",
-            "headerType=none",
+            f"path={quote(xhttp_path)}",
+            f"host={effective_host}",
         ])
         return f"vless://{user_uuid}@{exit_node_ip}:{port}?{params}#{quote(remark)}"
 
@@ -110,6 +114,7 @@ class UserService:
             short_id=exit_node.short_id or "",
             reality_sni=exit_node.reality_sni or settings.REALITY_SNI,
             remark=name,
+            xhttp_host=settings.XHTTP_HOST,
         )
         qr_bytes = self._generate_qr_code(vless_url)
         return user, vless_url, qr_bytes

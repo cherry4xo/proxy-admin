@@ -31,6 +31,9 @@ class Settings(BaseSettings):
 
     # Xray defaults
     REALITY_SNI: str = "www.microsoft.com"
+    # HTTP Host заголовок для XHTTP транспорта — должен быть твой домен или IP ноды
+    # Если пустой — используется IP ноды автоматически
+    XHTTP_HOST: str = ""
     XRAY_API_PORT: int = 8080
     # "docker" или "systemd" — способ запуска Xray на нодах
     XRAY_RUNTIME: str = "systemd"

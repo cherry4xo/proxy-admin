@@ -89,6 +89,21 @@ class NodeService:
             await session.refresh(node)
             return node
 
+    async def deploy_custom_config(self, node_id: int, config_json: str) -> None:
+        async with self._session_factory() as session:
+            result = await session.execute(select(Node).where(Node.id == node_id))
+            node = result.scalar_one_or_none()
+            if not node:
+                raise ValueError(f"Node {node_id} not found")
+            if not node.ip:
+                raise ValueError(f"Node {node_id} has no IP address")
+            key_result = await session.execute(select(SSHKey).where(SSHKey.id == node.ssh_key_id))
+            ssh_key = key_result.scalar_one()
+
+        ssh = self._make_ssh_client(node, ssh_key)
+        await ssh.deploy_xray_config(config_json, xray_runtime=settings.XRAY_RUNTIME)
+        logger.info("Custom config deployed to node %d", node_id)
+
     async def get_bot_public_key(self) -> str:
         async with self._session_factory() as session:
             result = await session.execute(select(SSHKey).limit(1))
@@ -181,6 +196,7 @@ class NodeService:
                 short_ids=short_ids,
                 reality_sni=node.reality_sni or settings.REALITY_SNI,
                 xray_api_port=node.xray_api_port,
+                xhttp_host=settings.XHTTP_HOST,
             )
         else:
             async with self._session_factory() as session:
@@ -278,6 +294,7 @@ class NodeService:
             short_ids=short_ids,
             reality_sni=sni,
             xray_api_port=settings.XRAY_API_PORT,
+            xhttp_host=settings.XHTTP_HOST,
         )
         await ssh.deploy_xray_config(config_json, xray_runtime=settings.XRAY_RUNTIME)
 
