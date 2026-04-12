@@ -89,6 +89,20 @@ class NodeService:
             await session.refresh(node)
             return node
 
+    async def get_xray_status(self, node_id: int) -> str:
+        async with self._session_factory() as session:
+            result = await session.execute(select(Node).where(Node.id == node_id))
+            node = result.scalar_one_or_none()
+            if not node:
+                raise ValueError(f"Node {node_id} not found")
+            if not node.ip:
+                raise ValueError(f"Node {node_id} has no IP address")
+            key_result = await session.execute(select(SSHKey).where(SSHKey.id == node.ssh_key_id))
+            ssh_key = key_result.scalar_one()
+
+        ssh = self._make_ssh_client(node, ssh_key)
+        return await ssh.xray_status()
+
     async def deploy_custom_config(self, node_id: int, config_json: str) -> None:
         async with self._session_factory() as session:
             result = await session.execute(select(Node).where(Node.id == node_id))

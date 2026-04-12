@@ -42,6 +42,9 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📊 Статус ноды", callback_data="node:status"),
     )
     builder.row(
+        InlineKeyboardButton(text="📊 Статус Xray на ноде", callback_data="node:xray_status"),
+    )
+    builder.row(
         InlineKeyboardButton(text="🌐 BitLaunch (live)", callback_data="node:list_bitlaunch"),
         InlineKeyboardButton(text="🌐 Yandex Cloud (live)", callback_data="node:list_yandex"),
     )

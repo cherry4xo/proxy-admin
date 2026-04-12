@@ -39,6 +39,9 @@ unzip -o /tmp/xray.zip xray -d /opt/xray
 chmod +x /opt/xray/xray
 rm /tmp/xray.zip
 
+curl -fsSLo /opt/xray/geosite.dat "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"
+curl -fsSLo /opt/xray/geoip.dat "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat"
+
 cat > /etc/systemd/system/xray.service << 'EOF'
 [Unit]
 Description=Xray Service
@@ -95,6 +98,15 @@ class SSHClient:
                 async with sftp.open(remote_path, "w") as f:
                     await f.write(content)
         logger.info("Uploaded file to %s:%s", self._host, remote_path)
+
+    async def xray_status(self) -> str:
+        commands = [
+            "systemctl is-active xray 2>&1 || true",
+            "ss -tlnp 2>/dev/null | grep -E '443|8080' || echo 'no ports'",
+            "journalctl -u xray -n 10 --no-pager 2>/dev/null || true",
+        ]
+        stdout, _ = await self.run_command(" && echo '---' && ".join(commands))
+        return stdout
 
     async def generate_x25519(self) -> tuple[str, str]:
         stdout, stderr = await self.run_command("/opt/xray/xray x25519")

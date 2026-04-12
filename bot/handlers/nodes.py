@@ -60,6 +60,10 @@ class UploadConfigFSM(StatesGroup):
     config_json = State()
 
 
+class XrayStatusFSM(StatesGroup):
+    node_id = State()
+
+
 @router.callback_query(F.data == "node:list_db")
 async def cb_list_db_nodes(callback: CallbackQuery, deps: Deps) -> None:
     nodes = await deps.node_service.list_nodes()
@@ -826,6 +830,58 @@ async def fsm_upload_config_json(message: Message, state: FSMContext, deps: Deps
         logger.exception("Failed to upload config to node %d", node_id)
         await message.answer(
             f"Ошибка деплоя:\n<code>{e}</code>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(F.data == "node:xray_status")
+async def cb_xray_status_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID ноды для проверки статуса Xray:",
+        reply_markup=back_keyboard(),
+    )
+    await state.set_state(XrayStatusFSM.node_id)
+    await callback.answer()
+
+
+@router.message(XrayStatusFSM.node_id)
+async def fsm_xray_status_node_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    try:
+        node_id = int(message.text or "")
+    except ValueError:
+        await message.answer("Введите числовой ID:")
+        return
+
+    await state.clear()
+    node = await deps.node_service.get_node(node_id)
+    if not node:
+        await message.answer("Нода не найдена.", reply_markup=back_keyboard())
+        return
+
+    await message.answer(f"Получаю статус Xray на <b>{node.name}</b>...", parse_mode="HTML")
+
+    try:
+        output = await deps.node_service.get_xray_status(node_id)
+        parts = output.split("---")
+        service_status = parts[0].strip() if len(parts) > 0 else "?"
+        ports = parts[1].strip() if len(parts) > 1 else "?"
+        logs = parts[2].strip() if len(parts) > 2 else "?"
+
+        icon = "🟢" if "active" in service_status else "🔴"
+
+        await message.answer(
+            f"{icon} <b>Xray на {node.name}</b> (<code>{node.ip}</code>)\n\n"
+            f"<b>Сервис:</b> <code>{service_status}</code>\n\n"
+            f"<b>Порты:</b>\n<code>{ports[:300]}</code>\n\n"
+            f"<b>Последние логи:</b>\n<code>{logs[:800]}</code>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Failed to get xray status for node %d", node_id)
+        await message.answer(
+            f"Ошибка:\n<code>{e}</code>",
             reply_markup=back_keyboard(),
             parse_mode="HTML",
         )
