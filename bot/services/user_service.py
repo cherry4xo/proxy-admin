@@ -119,6 +119,28 @@ class UserService:
         qr_bytes = self._generate_qr_code(vless_url)
         return user, vless_url, qr_bytes
 
+    async def get_user_config(self, user_id: int) -> tuple[str, bytes]:
+        async with self._session_factory() as session:
+            result = await session.execute(select(User).where(User.id == user_id))
+            user = result.scalar_one_or_none()
+            if not user:
+                raise ValueError(f"User {user_id} not found")
+
+            node_result = await session.execute(select(Node).where(Node.id == user.exit_node_id))
+            exit_node = node_result.scalar_one()
+
+        vless_url = self._build_vless_url(
+            user_uuid=user.uuid,
+            exit_node_ip=exit_node.ip or "",
+            x25519_public=exit_node.x25519_public or "",
+            short_id=exit_node.short_id or "",
+            reality_sni=exit_node.reality_sni or settings.REALITY_SNI,
+            remark=user.name,
+            xhttp_host=settings.XHTTP_HOST,
+        )
+        qr_bytes = self._generate_qr_code(vless_url)
+        return vless_url, qr_bytes
+
     async def deactivate_user(self, user_id: int, delete_from_db: bool = False) -> None:
         async with self._session_factory() as session:
             result = await session.execute(select(User).where(User.id == user_id))

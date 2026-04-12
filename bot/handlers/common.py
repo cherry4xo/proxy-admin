@@ -28,10 +28,16 @@ async def cmd_menu(message: Message) -> None:
 
 @router.callback_query(lambda c: c.data == "menu:main")
 async def cb_main_menu(callback: CallbackQuery) -> None:
-    await callback.message.edit_text(  # type: ignore[union-attr]
-        "Главное меню:",
-        reply_markup=main_menu_keyboard(),
-    )
+    try:
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            "Главное меню:",
+            reply_markup=main_menu_keyboard(),
+        )
+    except Exception:
+        await callback.message.answer(  # type: ignore[union-attr]
+            "Главное меню:",
+            reply_markup=main_menu_keyboard(),
+        )
     await callback.answer()
 
 

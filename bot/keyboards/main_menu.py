@@ -79,6 +79,9 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🔒 Заблокировать", callback_data="user:block"),
         InlineKeyboardButton(text="❌ Удалить", callback_data="user:delete"),
     )
+    builder.row(
+        InlineKeyboardButton(text="📲 Получить конфиг пользователя", callback_data="user:get_config"),
+    )
 
     return builder.as_markup()
 

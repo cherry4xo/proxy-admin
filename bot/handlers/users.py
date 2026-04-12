@@ -21,6 +21,10 @@ class UserActionFSM(StatesGroup):
     user_id = State()
 
 
+class GetConfigFSM(StatesGroup):
+    user_id = State()
+
+
 @router.callback_query(F.data == "user:list")
 async def cb_user_list(callback: CallbackQuery, deps: Deps) -> None:
     users = await deps.user_service.list_users()
@@ -135,4 +139,41 @@ async def fsm_user_action_id(message: Message, state: FSMContext, deps: Deps) ->
         await message.answer(f"Пользователь #{user_id} {action_label}.", reply_markup=back_keyboard())
     except Exception as e:
         logger.exception("Failed to %s user %d", action, user_id)
+        await message.answer(f"Ошибка:\n<code>{e}</code>", reply_markup=back_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "user:get_config")
+async def cb_get_config_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID пользователя:",
+        reply_markup=back_keyboard(),
+    )
+    await state.set_state(GetConfigFSM.user_id)
+    await callback.answer()
+
+
+@router.message(GetConfigFSM.user_id)
+async def fsm_get_config_user_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    try:
+        user_id = int(message.text or "")
+    except ValueError:
+        await message.answer("Введите числовой ID:")
+        return
+
+    await state.clear()
+
+    try:
+        vless_url, qr_bytes = await deps.user_service.get_user_config(user_id)
+        await message.answer(
+            f"VLESS-ссылка пользователя #{user_id}:\n\n"
+            f"<code>{vless_url}</code>",
+            parse_mode="HTML",
+        )
+        await message.answer_photo(
+            photo=BufferedInputFile(qr_bytes, filename="qrcode.png"),
+            caption=f"QR-код пользователя #{user_id}",
+            reply_markup=back_keyboard(),
+        )
+    except Exception as e:
+        logger.exception("Failed to get config for user %d", user_id)
         await message.answer(f"Ошибка:\n<code>{e}</code>", reply_markup=back_keyboard(), parse_mode="HTML")

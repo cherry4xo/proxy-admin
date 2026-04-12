@@ -14,7 +14,7 @@ _DOCKER_START_CMD = (
     "  -p 443:443 -p 8080:8080 "
     "  teddysun/xray:latest"
 )
-_SYSTEMD_START_CMD = "systemctl restart xray"
+_SYSTEMD_START_CMD = "systemctl is-active --quiet xray && systemctl restart xray || systemctl start xray"
 
 _XRAY_SETUP_SCRIPT = """\
 set -euo pipefail
@@ -53,6 +53,8 @@ LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 EOF
+
+ln -sf /opt/xray/xray /usr/local/bin/xray
 
 systemctl daemon-reload
 systemctl enable xray
