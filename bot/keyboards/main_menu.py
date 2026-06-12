@@ -43,6 +43,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(text="📊 Статус Xray на ноде", callback_data="node:xray_status"),
+        InlineKeyboardButton(text="♻️ Перезапустить Xray", callback_data="node:restart_xray"),
     )
     builder.row(
         InlineKeyboardButton(text="🌐 BitLaunch (live)", callback_data="node:list_bitlaunch"),
@@ -83,7 +84,10 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="❌ Удалить", callback_data="user:delete"),
     )
     builder.row(
-        InlineKeyboardButton(text="📲 Получить конфиг пользователя", callback_data="user:get_config"),
+        InlineKeyboardButton(text="📲 Конфиг (прямой → Exit)", callback_data="user:get_config"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🌉 Конфиг (через Bridge)", callback_data="user:get_bridge_config"),
     )
 
     return builder.as_markup()

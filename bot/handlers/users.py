@@ -25,6 +25,10 @@ class GetConfigFSM(StatesGroup):
     user_id = State()
 
 
+class GetBridgeConfigFSM(StatesGroup):
+    user_id = State()
+
+
 @router.callback_query(F.data == "user:list")
 async def cb_user_list(callback: CallbackQuery, deps: Deps) -> None:
     users = await deps.user_service.list_users()
@@ -82,7 +86,7 @@ async def fsm_user_exit_node(message: Message, state: FSMContext, deps: Deps) ->
 
     try:
         telegram_id = message.from_user.id if message.from_user else None
-        user, vless_url, qr_bytes = await deps.user_service.create_user(
+        user, vless_url, qr_bytes, bridge_url, bridge_qr = await deps.user_service.create_user(
             name=name,
             exit_node_id=exit_node_id,
             telegram_id=telegram_id,
@@ -90,14 +94,24 @@ async def fsm_user_exit_node(message: Message, state: FSMContext, deps: Deps) ->
         await message.answer(
             f"Пользователь <b>{user.name}</b> создан!\n\n"
             f"UUID: <code>{user.uuid}</code>\n\n"
-            f"VLESS-ссылка:\n<code>{vless_url}</code>",
+            f"🔗 Прямая (Exit):\n<code>{vless_url}</code>",
             parse_mode="HTML",
         )
         await message.answer_photo(
-            photo=BufferedInputFile(qr_bytes, filename="qrcode.png"),
-            caption=f"QR-код для {user.name}",
-            reply_markup=back_keyboard(),
+            photo=BufferedInputFile(qr_bytes, filename="qrcode-exit.png"),
+            caption=f"QR (прямой → Exit) для {user.name}",
+            reply_markup=None if bridge_url else back_keyboard(),
         )
+        if bridge_url and bridge_qr:
+            await message.answer(
+                f"🌉 Через Bridge (RU):\n<code>{bridge_url}</code>",
+                parse_mode="HTML",
+            )
+            await message.answer_photo(
+                photo=BufferedInputFile(bridge_qr, filename="qrcode-bridge.png"),
+                caption=f"QR (через Bridge) для {user.name}",
+                reply_markup=back_keyboard(),
+            )
     except Exception as e:
         logger.exception("Failed to create user")
         await message.answer(f"Ошибка создания пользователя:\n<code>{e}</code>", reply_markup=back_keyboard(), parse_mode="HTML")
@@ -176,4 +190,41 @@ async def fsm_get_config_user_id(message: Message, state: FSMContext, deps: Deps
         )
     except Exception as e:
         logger.exception("Failed to get config for user %d", user_id)
+        await message.answer(f"Ошибка:\n<code>{e}</code>", reply_markup=back_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "user:get_bridge_config")
+async def cb_get_bridge_config_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID пользователя (конфиг через Bridge):",
+        reply_markup=back_keyboard(),
+    )
+    await state.set_state(GetBridgeConfigFSM.user_id)
+    await callback.answer()
+
+
+@router.message(GetBridgeConfigFSM.user_id)
+async def fsm_get_bridge_config_user_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    try:
+        user_id = int(message.text or "")
+    except ValueError:
+        await message.answer("Введите числовой ID:")
+        return
+
+    await state.clear()
+
+    try:
+        vless_url, qr_bytes = await deps.user_service.get_user_bridge_config(user_id)
+        await message.answer(
+            f"🌉 VLESS через Bridge (пользователь #{user_id}):\n\n"
+            f"<code>{vless_url}</code>",
+            parse_mode="HTML",
+        )
+        await message.answer_photo(
+            photo=BufferedInputFile(qr_bytes, filename="qrcode-bridge.png"),
+            caption=f"QR (через Bridge) #{user_id}",
+            reply_markup=back_keyboard(),
+        )
+    except Exception as e:
+        logger.exception("Failed to get bridge config for user %d", user_id)
         await message.answer(f"Ошибка:\n<code>{e}</code>", reply_markup=back_keyboard(), parse_mode="HTML")

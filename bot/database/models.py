@@ -33,11 +33,14 @@ class Node(Base):
     ssh_key_id: Mapped[int] = mapped_column(ForeignKey("ssh_keys.id"), nullable=False)
     ssh_key: Mapped[SSHKey] = relationship("SSHKey", back_populates="nodes")
 
-    # REALITY / X25519 (только для Exit Node, зашифровано Fernet)
+    # REALITY / X25519 (для Exit Node, а с двухплечевым bridge — и для Bridge Node; зашифровано Fernet)
     x25519_private_encrypted: Mapped[str | None] = mapped_column(String, nullable=True)
     x25519_public: Mapped[str | None] = mapped_column(String, nullable=True)
     short_id: Mapped[str | None] = mapped_column(String, nullable=True)
     reality_sni: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Bridge-only: единый VLESS uuid, которым Bridge аутентифицируется на Exit.
+    bridge_uuid: Mapped[str | None] = mapped_column(String, nullable=True)
 
     xray_api_port: Mapped[int] = mapped_column(Integer, default=8080)
     status: Mapped[str] = mapped_column(String, default="provisioning")

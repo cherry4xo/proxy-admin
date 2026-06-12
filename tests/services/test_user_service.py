@@ -77,6 +77,7 @@ def mock_node_service(mocker):
     from bot.services.node_service import NodeService
     svc = mocker.Mock(spec=NodeService)
     svc.redeploy_node = mocker.AsyncMock()
+    svc.redeploy_exit_with_bridges = mocker.AsyncMock()
     return svc
 
 
@@ -94,6 +95,22 @@ def _make_scalar_result(mocker, value):
     return result
 
 
+def _make_bridge_result(mocker, value):
+    """Результат для select(...).scalars().first() — поиск bridge."""
+    result = mocker.Mock()
+    scalars = mocker.Mock()
+    scalars.first.return_value = value
+    result.scalars.return_value = scalars
+    return result
+
+
+def _make_all_result(mocker, rows):
+    """Результат для execute(...).all() — поиск нескольких строк (bridge+ssh_key)."""
+    result = mocker.Mock()
+    result.all.return_value = rows
+    return result
+
+
 @pytest.mark.asyncio
 async def test_create_user_saves_user_and_redeploys(
     service: UserService,
@@ -101,23 +118,35 @@ async def test_create_user_saves_user_and_redeploys(
     mock_session,
     exit_node: Node,
     ssh_key: SSHKey,
+    active_user: User,
+    mock_xray: XrayApiClient,
     mock_node_service,
     mocker,
 ):
     mock_session.execute.side_effect = [
-        _make_scalar_result(mocker, exit_node),
-        _make_scalar_result(mocker, ssh_key),
+        _make_scalar_result(mocker, exit_node),   # exit lookup
+        _make_scalar_result(mocker, ssh_key),     # ssh_key lookup
+        _make_all_result(mocker, []),             # _add_user_to_running_nodes: bridges → нет
+        _make_scalar_result(mocker, active_user), # get_user_bridge_config: user lookup
+        _make_bridge_result(mocker, None),        # get_user_bridge_config: bridge lookup → нет bridge
     ]
     mock_session.add = mocker.Mock()
     mock_session.commit = mocker.AsyncMock()
     mock_session.refresh = mocker.AsyncMock()
     session_factory.return_value = mock_session
 
-    user, vless_url, qr_bytes = await service.create_user(name="alice", exit_node_id=10)
+    user, vless_url, qr_bytes, bridge_url, bridge_qr = await service.create_user(
+        name="alice", exit_node_id=10
+    )
 
-    mock_node_service.redeploy_node.assert_called_once_with(10)
+    # Горячий путь: adduser на exit, без полного redeploy.
+    mock_xray.add_user.assert_any_call("inbound-vless", user.uuid, flow="")
+    mock_node_service.redeploy_exit_with_bridges.assert_not_called()
     assert "1.2.3.4" in vless_url
     assert len(qr_bytes) > 0
+    # bridge не привязан → bridge-ссылки нет
+    assert bridge_url is None
+    assert bridge_qr is None
 
 
 @pytest.mark.asyncio

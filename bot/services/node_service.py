@@ -103,6 +103,20 @@ class NodeService:
         ssh = self._make_ssh_client(node, ssh_key)
         return await ssh.xray_status()
 
+    async def restart_xray(self, node_id: int) -> str:
+        async with self._session_factory() as session:
+            result = await session.execute(select(Node).where(Node.id == node_id))
+            node = result.scalar_one_or_none()
+            if not node:
+                raise ValueError(f"Node {node_id} not found")
+            if not node.ip:
+                raise ValueError(f"Node {node_id} has no IP address")
+            key_result = await session.execute(select(SSHKey).where(SSHKey.id == node.ssh_key_id))
+            ssh_key = key_result.scalar_one()
+
+        ssh = self._make_ssh_client(node, ssh_key)
+        return await ssh.restart_xray()
+
     async def deploy_custom_config(self, node_id: int, config_json: str) -> None:
         async with self._session_factory() as session:
             result = await session.execute(select(Node).where(Node.id == node_id))
@@ -202,10 +216,19 @@ class NodeService:
                     "Use 'Set X25519 key' to add it after importing."
                 )
             users = await self._get_node_users(node)
+            client_uuids = [u.uuid for u in users]
+            # Exit принимает как прямых юзеров, так и привязанные Bridge (по их bridge_uuid).
+            async with self._session_factory() as session:
+                bridge_rows = await session.execute(
+                    select(Node.bridge_uuid)
+                    .join(NodeLink, NodeLink.bridge_id == Node.id)
+                    .where(NodeLink.exit_id == node_id, Node.bridge_uuid.isnot(None))
+                )
+                client_uuids += [bu for (bu,) in bridge_rows.all() if bu]
             x25519_priv = decrypt(node.x25519_private_encrypted)
             short_ids = (node.short_id or "").split(",") if node.short_id else generate_short_ids()
             config_json = render_exit_node_config(
-                clients=[{"uuid": u.uuid} for u in users],
+                clients=[{"uuid": u} for u in client_uuids],
                 x25519_private=x25519_priv,
                 short_ids=short_ids,
                 reality_sni=node.reality_sni or settings.REALITY_SNI,
@@ -223,18 +246,54 @@ class NodeService:
                 exit_result = await session.execute(select(Node).where(Node.id == link.exit_id))
                 exit_node = exit_result.scalar_one()
 
+            if not node.bridge_uuid or not node.x25519_private_encrypted:
+                raise ValueError(
+                    f"Bridge node {node_id} missing bridge_uuid/x25519. Recreate it."
+                )
             users = await self._get_node_users(exit_node)
+            bx_priv = decrypt(node.x25519_private_encrypted)
+            bridge_short_ids = (
+                (node.short_id or "").split(",") if node.short_id else generate_short_ids()
+            )
+            first_exit_sid = (
+                (exit_node.short_id or "").split(",")[0] if exit_node.short_id else ""
+            )
             config_json = render_bridge_node_config(
                 clients=[{"uuid": u.uuid} for u in users],
                 exit_node_ip=exit_node.ip or "",
-                bridge_uuid=generate_uuid(),
+                bridge_uuid=node.bridge_uuid,
                 x25519_public=exit_node.x25519_public or "",
-                short_id=(exit_node.short_id or "").split(",")[0] if exit_node.short_id else "",
+                short_id=first_exit_sid,
                 reality_sni=exit_node.reality_sni or settings.REALITY_SNI,
+                bridge_x25519_private=bx_priv,
+                bridge_short_ids=bridge_short_ids,
+                bridge_reality_sni=node.reality_sni or settings.REALITY_SNI,
+                xhttp_host=settings.XHTTP_HOST,
+                bridge_xhttp_host=settings.XHTTP_HOST,
             )
 
         await ssh.deploy_xray_config(config_json, xray_runtime=settings.XRAY_RUNTIME)
         logger.info("Node %d redeployed", node_id)
+
+    async def redeploy_exit_with_bridges(self, exit_id: int) -> None:
+        """Переразвернуть Exit и все привязанные к нему Bridge.
+
+        Нужно при добавлении/удалении юзера: новый клиент должен попасть
+        и в inbound Exit, и в inbound каждого привязанного Bridge.
+        """
+        await self.redeploy_node(exit_id)
+        async with self._session_factory() as session:
+            rows = await session.execute(
+                select(NodeLink.bridge_id).where(NodeLink.exit_id == exit_id)
+            )
+            bridge_ids = [b for (b,) in rows.all()]
+        for bid in bridge_ids:
+            try:
+                await self.redeploy_node(bid)
+            except Exception:
+                logger.exception(
+                    "Failed to redeploy bridge %d after exit %d change", bid, exit_id
+                )
 
     async def redeploy_all_nodes(self) -> list[tuple[int, str, Exception | None]]:
         nodes = await self.list_nodes()
@@ -348,7 +407,13 @@ class NodeService:
         op = await self._yandex.wait_for_operation(operation["id"])
         instance_id = op.get("response", {}).get("id") or op.get("metadata", {}).get("instanceId", "")
         ip = await self._yandex.wait_for_instance_ip(instance_id)
+
+        # Двухплечевой REALITY: у Bridge собственные ключи для плеча клиент↔bridge,
+        # и стабильный bridge_uuid, которым Bridge аутентифицируется на Exit.
         bridge_uuid = generate_uuid()
+        bx_priv, bx_pub = generate_x25519_keypair()
+        bridge_short_ids = generate_short_ids()
+        bridge_sni = exit_node.reality_sni or settings.REALITY_SNI
 
         async with self._session_factory() as session:
             ssh_key = await self._get_or_create_ssh_key(session)
@@ -359,7 +424,11 @@ class NodeService:
                 name=name,
                 ip=ip,
                 ssh_key_id=ssh_key.id,
-                reality_sni=exit_node.reality_sni,
+                x25519_private_encrypted=encrypt(bx_priv),
+                x25519_public=bx_pub,
+                short_id=",".join(bridge_short_ids),
+                reality_sni=bridge_sni,
+                bridge_uuid=bridge_uuid,
                 xray_api_port=settings.XRAY_API_PORT,
                 status="provisioning",
             )
@@ -371,16 +440,25 @@ class NodeService:
             await session.refresh(node)
 
         ssh = self._make_ssh_client(node, ssh_key)
+        users = await self._get_node_users(exit_node)
         first_short_id = (exit_node.short_id or "").split(",")[0] if exit_node.short_id else ""
         config_json = render_bridge_node_config(
-            clients=[],
+            clients=[{"uuid": u.uuid} for u in users],
             exit_node_ip=exit_node.ip or "",
             bridge_uuid=bridge_uuid,
             x25519_public=exit_node.x25519_public or "",
             short_id=first_short_id,
             reality_sni=exit_node.reality_sni or settings.REALITY_SNI,
+            bridge_x25519_private=bx_priv,
+            bridge_short_ids=bridge_short_ids,
+            bridge_reality_sni=bridge_sni,
+            xhttp_host=settings.XHTTP_HOST,
+            bridge_xhttp_host=settings.XHTTP_HOST,
         )
         await ssh.deploy_xray_config(config_json, xray_runtime=settings.XRAY_RUNTIME)
+
+        # Exit должен принять Bridge как клиента → переразворачиваем Exit с bridge_uuid.
+        await self.redeploy_node(exit_node.id)
 
         async with self._session_factory() as session:
             result = await session.execute(select(Node).where(Node.id == node.id))

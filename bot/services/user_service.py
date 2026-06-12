@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot.config import settings
-from bot.database.models import Node, SSHKey, User
+from bot.database.models import Node, NodeLink, SSHKey, User
 from bot.services.keygen import generate_uuid
 from bot.services.ssh import SSHClient
 from bot.services.xray_api import XrayApiClient
@@ -74,6 +74,37 @@ class UserService:
         ssh = SSHClient(node.ip or "", node.ssh_port, ssh_key.private_key_encrypted)
         return XrayApiClient(node.ip or "", node.xray_api_port, ssh)
 
+    async def _add_user_to_running_nodes(
+        self, exit_node: Node, exit_ssh_key: SSHKey, user_uuid: str
+    ) -> None:
+        """Горячее добавление юзера в Exit и привязанные Bridge без рестарта.
+
+        При любой ошибке откатываемся на полный безопасный redeploy
+        (test+restart+rollback), который рендерит конфиг из БД — источника истины.
+        """
+        try:
+            xray = self._make_xray_client(exit_node, exit_ssh_key)
+            await xray.add_user("inbound-vless", user_uuid, flow="")
+
+            async with self._session_factory() as session:
+                bridge_rows = await session.execute(
+                    select(Node, SSHKey)
+                    .join(NodeLink, NodeLink.bridge_id == Node.id)
+                    .join(SSHKey, SSHKey.id == Node.ssh_key_id)
+                    .where(NodeLink.exit_id == exit_node.id, Node.role == "bridge")
+                )
+                bridges = list(bridge_rows.all())
+
+            for bridge, bridge_key in bridges:
+                if not bridge.ip:
+                    continue
+                bxray = self._make_xray_client(bridge, bridge_key)
+                await bxray.add_user("inbound-client", user_uuid, flow="")
+        except Exception:
+            logger.exception("adduser fast-path failed, falling back to redeploy")
+            if self._node_service:
+                await self._node_service.redeploy_exit_with_bridges(exit_node.id)
+
     async def list_users(self, exit_node_id: int | None = None) -> list[User]:
         async with self._session_factory() as session:
             query = select(User)
@@ -87,7 +118,7 @@ class UserService:
         name: str,
         exit_node_id: int,
         telegram_id: int | None = None,
-    ) -> tuple[User, str, bytes]:
+    ) -> tuple[User, str, bytes, str | None, bytes | None]:
         async with self._session_factory() as session:
             node_result = await session.execute(select(Node).where(Node.id == exit_node_id))
             exit_node = node_result.scalar_one_or_none()
@@ -114,8 +145,8 @@ class UserService:
             await session.commit()
             await session.refresh(user)
 
-        if self._node_service:
-            await self._node_service.redeploy_node(exit_node_id)
+        # Горячее добавление без рестарта (fallback на redeploy внутри хелпера).
+        await self._add_user_to_running_nodes(exit_node, ssh_key, user_uuid)
 
         vless_url = self._build_vless_url(
             user_uuid=user_uuid,
@@ -127,7 +158,16 @@ class UserService:
             xhttp_host=settings.XHTTP_HOST,
         )
         qr_bytes = self._generate_qr_code(vless_url)
-        return user, vless_url, qr_bytes
+
+        # Если к exit привязан bridge — отдаём и bridge-ссылку (RU IP, лучше против РКН).
+        bridge_url: str | None = None
+        bridge_qr: bytes | None = None
+        try:
+            bridge_url, bridge_qr = await self.get_user_bridge_config(user.id)
+        except ValueError:
+            pass  # bridge не привязан/не готов — отдаём только exit-ссылку
+
+        return user, vless_url, qr_bytes, bridge_url, bridge_qr
 
     async def get_user_config(self, user_id: int) -> tuple[str, bytes]:
         async with self._session_factory() as session:
@@ -146,6 +186,44 @@ class UserService:
             short_id=exit_node.short_id or "",
             reality_sni=exit_node.reality_sni or settings.REALITY_SNI,
             remark=user.name,
+            xhttp_host=settings.XHTTP_HOST,
+        )
+        qr_bytes = self._generate_qr_code(vless_url)
+        return vless_url, qr_bytes
+
+    async def get_user_bridge_config(self, user_id: int) -> tuple[str, bytes]:
+        """Конфиг, маршрутизирующий клиента через Bridge (RU IP) → Exit.
+
+        Ищет Bridge, привязанный к exit-ноде юзера, и строит ссылку на Bridge
+        с REALITY-параметрами самого Bridge (плечо клиент↔bridge).
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(select(User).where(User.id == user_id))
+            user = result.scalar_one_or_none()
+            if not user:
+                raise ValueError(f"User {user_id} not found")
+
+            bridge_result = await session.execute(
+                select(Node)
+                .join(NodeLink, NodeLink.bridge_id == Node.id)
+                .where(NodeLink.exit_id == user.exit_node_id, Node.role == "bridge")
+            )
+            bridge = bridge_result.scalars().first()
+
+        if not bridge:
+            raise ValueError(
+                f"No bridge linked to exit node #{user.exit_node_id} for user {user_id}"
+            )
+        if not bridge.ip or not bridge.x25519_public:
+            raise ValueError(f"Bridge #{bridge.id} is not fully configured (no IP/x25519)")
+
+        vless_url = self._build_vless_url(
+            user_uuid=user.uuid,
+            exit_node_ip=bridge.ip,
+            x25519_public=bridge.x25519_public,
+            short_id=bridge.short_id or "",
+            reality_sni=bridge.reality_sni or settings.REALITY_SNI,
+            remark=f"{user.name} (via bridge)",
             xhttp_host=settings.XHTTP_HOST,
         )
         qr_bytes = self._generate_qr_code(vless_url)
@@ -177,4 +255,4 @@ class UserService:
             await session.commit()
 
         if self._node_service:
-            await self._node_service.redeploy_node(exit_node.id)
+            await self._node_service.redeploy_exit_with_bridges(exit_node.id)

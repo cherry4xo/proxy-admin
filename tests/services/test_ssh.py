@@ -1,6 +1,6 @@
 import pytest
 
-from bot.services.ssh import SSHClient, _DOCKER_START_CMD, _SYSTEMD_START_CMD
+from bot.services.ssh import SSHClient, _CONFIG_PATH, _SYSTEMD_RESTART_CMD
 
 
 @pytest.fixture()
@@ -25,23 +25,33 @@ def _mock_upload(ssh_client: SSHClient, mocker):
 
 @pytest.fixture()
 def _mock_run(ssh_client: SSHClient, mocker):
-    mocker.patch.object(ssh_client, "run_command", return_value=("ok", ""))
+    # Валидный конфиг: xray -test печатает "Configuration OK".
+    mocker.patch.object(ssh_client, "run_command", return_value=("Configuration OK", ""))
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_mock_upload", "_mock_run")
-async def test_deploy_xray_config_systemd_uses_systemctl(ssh_client: SSHClient):
-    await ssh_client.deploy_xray_config("{}}", xray_runtime="systemd")
+async def test_deploy_xray_config_tests_then_restarts(ssh_client: SSHClient):
+    await ssh_client.deploy_xray_config("{}", xray_runtime="systemd")
 
-    ssh_client.run_command.assert_called_once_with(_SYSTEMD_START_CMD)
+    calls = [c.args[0] for c in ssh_client.run_command.call_args_list]
+    assert any("xray -test" in cmd for cmd in calls)
+    ssh_client.run_command.assert_any_call(_SYSTEMD_RESTART_CMD)
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("_mock_upload", "_mock_run")
-async def test_deploy_xray_config_docker_uses_docker_cmd(ssh_client: SSHClient):
-    await ssh_client.deploy_xray_config("{}", xray_runtime="docker")
+@pytest.mark.usefixtures("_mock_upload")
+async def test_deploy_xray_config_rolls_back_on_invalid(ssh_client: SSHClient, mocker):
+    # xray -test не вернул "Configuration OK" → невалидный конфиг.
+    mocker.patch.object(ssh_client, "run_command", return_value=("error: bad config", ""))
 
-    ssh_client.run_command.assert_called_once_with(_DOCKER_START_CMD)
+    with pytest.raises(RuntimeError, match="rolled back"):
+        await ssh_client.deploy_xray_config("{bad}", xray_runtime="systemd")
+
+    calls = [c.args[0] for c in ssh_client.run_command.call_args_list]
+    # Откат выполнен, рестарт НЕ вызван.
+    assert any("mv -f" in cmd for cmd in calls)
+    assert _SYSTEMD_RESTART_CMD not in calls
 
 
 @pytest.mark.asyncio
@@ -51,7 +61,7 @@ async def test_deploy_xray_config_uploads_to_correct_path(ssh_client: SSHClient)
 
     await ssh_client.deploy_xray_config(config, xray_runtime="systemd")
 
-    ssh_client.upload_file.assert_called_once_with("/opt/xray/conf/config.json", config)
+    ssh_client.upload_file.assert_called_once_with(_CONFIG_PATH, config)
 
 
 @pytest.mark.asyncio

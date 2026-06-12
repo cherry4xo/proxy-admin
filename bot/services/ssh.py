@@ -6,15 +6,11 @@ from bot.services.keygen import decrypt
 
 logger = logging.getLogger(__name__)
 
-_DOCKER_START_CMD = (
-    "docker ps --filter name=xray --format '{{.Names}}' | grep -q xray "
-    "&& docker restart xray "
-    "|| docker run -d --name xray --restart always "
-    "  -v /opt/xray/conf:/etc/xray "
-    "  -p 443:443 -p 8080:8080 "
-    "  teddysun/xray:latest"
-)
-_SYSTEMD_START_CMD = "systemctl is-active --quiet xray && systemctl reload-or-restart xray || systemctl start xray"
+_XRAY_BIN = "/opt/xray/xray"
+_CONFIG_PATH = "/opt/xray/conf/config.json"
+
+# Xray-core НЕ поддерживает SIGHUP hot-reload — всегда полный рестарт процесса.
+_SYSTEMD_RESTART_CMD = "systemctl restart xray && systemctl is-active --quiet xray"
 
 _XRAY_SETUP_SCRIPT = """\
 set -euo pipefail
@@ -49,7 +45,7 @@ After=network.target
 
 [Service]
 ExecStart=/opt/xray/xray run -c /opt/xray/conf/config.json
-ExecReload=/bin/kill -HUP $MAINPID
+ExecReload=/bin/sh -c '/bin/systemctl restart xray'
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65535
@@ -135,9 +131,37 @@ class SSHClient:
         self,
         config_json: str,
         xray_runtime: str = "systemd",
-        config_remote_path: str = "/opt/xray/conf/config.json",
+        config_remote_path: str = _CONFIG_PATH,
     ) -> None:
+        # Xray запускается через systemd (не Docker — дорого по памяти).
+        # xray_runtime сохранён в сигнатуре для обратной совместимости вызовов.
+        backup_path = f"{config_remote_path}.bak"
+        # 1. Бэкап текущего конфига (на первом деплое файла ещё нет — игнорируем ошибку).
+        await self.run_command(f"cp -f {config_remote_path} {backup_path} 2>/dev/null || true")
+
+        # 2. Заливаем новый конфиг.
         await self.upload_file(config_remote_path, config_json)
-        start_cmd = _DOCKER_START_CMD if xray_runtime == "docker" else _SYSTEMD_START_CMD
-        stdout, stderr = await self.run_command(start_cmd)
-        logger.info("Xray start/restart on %s: %s %s", self._host, stdout.strip(), stderr.strip())
+
+        # 3. Валидируем ДО рестарта рабочего процесса.
+        stdout, stderr = await self.run_command(f"{_XRAY_BIN} -test -c {config_remote_path}")
+        test_output = stdout + stderr
+        if "Configuration OK" not in test_output:
+            # Откатываемся и отдаём ошибку валидации боту.
+            await self.run_command(
+                f"test -f {backup_path} && mv -f {backup_path} {config_remote_path} || true"
+            )
+            raise RuntimeError(
+                f"Xray config validation failed, rolled back:\n{test_output.strip()}"
+            )
+
+        # 4. Конфиг валиден — полный рестарт (Xray не умеет SIGHUP hot-reload).
+        stdout, stderr = await self.run_command(_SYSTEMD_RESTART_CMD)
+        logger.info("Xray restart on %s: %s %s", self._host, stdout.strip(), stderr.strip())
+
+        # 5. Чистим бэкап после успеха.
+        await self.run_command(f"rm -f {backup_path}")
+
+    async def restart_xray(self) -> str:
+        stdout, stderr = await self.run_command(_SYSTEMD_RESTART_CMD)
+        logger.info("Xray manual restart on %s: %s %s", self._host, stdout.strip(), stderr.strip())
+        return stdout or stderr

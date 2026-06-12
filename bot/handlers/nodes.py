@@ -64,6 +64,10 @@ class XrayStatusFSM(StatesGroup):
     node_id = State()
 
 
+class RestartXrayFSM(StatesGroup):
+    node_id = State()
+
+
 @router.callback_query(F.data == "node:list_db")
 async def cb_list_db_nodes(callback: CallbackQuery, deps: Deps) -> None:
     nodes = await deps.node_service.list_nodes()
@@ -880,6 +884,48 @@ async def fsm_xray_status_node_id(message: Message, state: FSMContext, deps: Dep
         )
     except Exception as e:
         logger.exception("Failed to get xray status for node %d", node_id)
+        await message.answer(
+            f"Ошибка:\n<code>{e}</code>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(F.data == "node:restart_xray")
+async def cb_restart_xray_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID ноды для перезапуска Xray:",
+        reply_markup=back_keyboard(),
+    )
+    await state.set_state(RestartXrayFSM.node_id)
+    await callback.answer()
+
+
+@router.message(RestartXrayFSM.node_id)
+async def fsm_restart_xray_node_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    try:
+        node_id = int(message.text or "")
+    except ValueError:
+        await message.answer("Введите числовой ID:")
+        return
+
+    await state.clear()
+    node = await deps.node_service.get_node(node_id)
+    if not node:
+        await message.answer("Нода не найдена.", reply_markup=back_keyboard())
+        return
+
+    await message.answer(f"Перезапускаю Xray на <b>{node.name}</b>...", parse_mode="HTML")
+
+    try:
+        output = await deps.node_service.restart_xray(node_id)
+        await message.answer(
+            f"♻️ Xray на <b>{node.name}</b> перезапущен.\n<code>{(output or 'ok')[:300]}</code>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Failed to restart xray for node %d", node_id)
         await message.answer(
             f"Ошибка:\n<code>{e}</code>",
             reply_markup=back_keyboard(),
