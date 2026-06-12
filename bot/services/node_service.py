@@ -163,6 +163,31 @@ class NodeService:
                 x25519_public=x25519_pub,
             )
             logger.info("Node %d x25519 keys generated and saved", node_id)
+        elif node.role == "bridge":
+            # Двухплечевой bridge: своя REALITY-пара ключей + стабильный bridge_uuid.
+            # SNI плеча клиент↔bridge берём от привязанного exit, если он есть.
+            x25519_priv, x25519_pub = await ssh.generate_x25519()
+            async with self._session_factory() as session:
+                link_result = await session.execute(
+                    select(NodeLink).where(NodeLink.bridge_id == node_id)
+                )
+                link = link_result.scalar_one_or_none()
+                bridge_sni: str | None = None
+                if link:
+                    exit_result = await session.execute(
+                        select(Node).where(Node.id == link.exit_id)
+                    )
+                    exit_node = exit_result.scalar_one_or_none()
+                    if exit_node:
+                        bridge_sni = exit_node.reality_sni
+            node = await self.set_node_x25519(
+                node_id=node_id,
+                x25519_private=x25519_priv,
+                x25519_public=x25519_pub,
+                reality_sni=bridge_sni,
+                bridge_uuid=generate_uuid(),
+            )
+            logger.info("Node %d bridge x25519 + bridge_uuid generated and saved", node_id)
 
         return node
 
@@ -173,6 +198,7 @@ class NodeService:
         x25519_public: str,
         short_ids: list[str] | None = None,
         reality_sni: str | None = None,
+        bridge_uuid: str | None = None,
     ) -> Node:
         async with self._session_factory() as session:
             result = await session.execute(select(Node).where(Node.id == node_id))
@@ -187,6 +213,8 @@ class NodeService:
                 node.short_id = ",".join(generate_short_ids())
             if reality_sni:
                 node.reality_sni = reality_sni
+            if bridge_uuid and not node.bridge_uuid:
+                node.bridge_uuid = bridge_uuid
             await session.commit()
             await session.refresh(node)
             return node
