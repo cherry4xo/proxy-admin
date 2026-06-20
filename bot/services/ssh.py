@@ -31,8 +31,7 @@ test -f "${{CERT_DIR}}/privkey.pem"
 
 cat > /etc/nginx/sites-available/reality-${{DOMAIN}}.conf << EOF
 server {{
-    listen 127.0.0.1:8443 ssl;
-    http2 on;
+    listen 127.0.0.1:8443 ssl http2;
     server_name ${{DOMAIN}};
     ssl_certificate     ${{CERT_DIR}}/fullchain.pem;
     ssl_certificate_key ${{CERT_DIR}}/privkey.pem;
