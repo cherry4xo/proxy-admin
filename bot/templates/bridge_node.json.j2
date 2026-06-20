@@ -48,8 +48,9 @@
         }
       },
       "sniffing": {
-        "enabled": false,
-        "destOverride": ["http", "tls", "quic", "fakedns"]
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
       }
     }
   ],
@@ -102,13 +103,23 @@
     "rules": [
       {
         "type": "field",
-        "outboundTag": "proxy-exit",
-        "inboundTag": ["inbound-client"]
+        "protocol": ["bittorrent"],
+        "outboundTag": "blocked"
       },
       {
         "type": "field",
-        "protocol": ["bittorrent"],
-        "outboundTag": "blocked"
+        "ip": ["geoip:private", "geoip:ru"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "domain": ["geosite:category-ru"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "inboundTag": ["inbound-client"],
+        "outboundTag": "proxy-exit"
       }
     ]
   }

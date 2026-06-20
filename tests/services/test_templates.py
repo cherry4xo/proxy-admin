@@ -49,6 +49,26 @@ def test_domain_render_uses_local_nginx_dest_and_single_servername():
     assert "www.pr.cherry4xo.ru" not in rs["serverNames"]
 
 
+def test_bridge_split_routing_ru_direct_rest_proxy():
+    out = render_bridge_node_config(bridge_reality_sni="www.microsoft.com", **_BASE)
+    d = json.loads(out)
+
+    inbound = d["inbounds"][0]
+    # sniffing включён для доменного матчинга (geosite), routeOnly — не переписывать dest
+    assert inbound["sniffing"]["enabled"] is True
+    assert inbound["sniffing"]["routeOnly"] is True
+
+    rules = d["routing"]["rules"]
+    tags = [r["outboundTag"] for r in rules]
+    # порядок: bittorrent блок → RU по IP → RU по доменам → всё остальное на exit
+    assert tags == ["blocked", "direct", "direct", "proxy-exit"]
+    assert "geoip:ru" in rules[1]["ip"]
+    assert rules[2]["domain"] == ["geosite:category-ru"]
+    # catch-all proxy-exit обязан быть последним
+    assert rules[-1]["inboundTag"] == ["inbound-client"]
+    assert rules[-1]["outboundTag"] == "proxy-exit"
+
+
 def test_outbound_proxy_exit_unchanged_in_domain_mode():
     out = render_bridge_node_config(
         bridge_reality_sni="pr.cherry4xo.ru",
