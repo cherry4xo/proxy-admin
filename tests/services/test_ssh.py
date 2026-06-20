@@ -65,6 +65,38 @@ async def test_deploy_xray_config_uploads_to_correct_path(ssh_client: SSHClient)
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("_mock_upload")
+async def test_deploy_tls_cert_uploads_to_domain_dir(ssh_client: SSHClient, mocker):
+    mocker.patch.object(ssh_client, "run_command", return_value=("", ""))
+
+    await ssh_client.deploy_tls_cert("FULL", "KEY", "pr.cherry4xo.ru")
+
+    paths = [c.args[0] for c in ssh_client.upload_file.call_args_list]
+    assert "/opt/xray/tls/pr.cherry4xo.ru/fullchain.pem" in paths
+    assert "/opt/xray/tls/pr.cherry4xo.ru/privkey.pem" in paths
+
+
+@pytest.mark.asyncio
+async def test_setup_bridge_nginx_ok_on_marker(ssh_client: SSHClient, mocker):
+    mocker.patch.object(ssh_client, "run_command", return_value=("NGINX_TLS_DONE", ""))
+
+    out = await ssh_client.setup_bridge_nginx("pr.cherry4xo.ru")
+
+    assert "NGINX_TLS_DONE" in out
+    script = ssh_client.run_command.call_args.args[0]
+    assert "pr.cherry4xo.ru" in script
+    assert "127.0.0.1:8443 ssl" in script
+
+
+@pytest.mark.asyncio
+async def test_setup_bridge_nginx_raises_without_marker(ssh_client: SSHClient, mocker):
+    mocker.patch.object(ssh_client, "run_command", return_value=("", "nginx: error"))
+
+    with pytest.raises(RuntimeError, match="Bridge nginx setup failed"):
+        await ssh_client.setup_bridge_nginx("pr.cherry4xo.ru")
+
+
+@pytest.mark.asyncio
 async def test_run_command_returns_stdout_stderr_on_nonzero_exit(ssh_client: SSHClient, mocker):
     mock_result = mocker.Mock()
     mock_result.stdout = "out"

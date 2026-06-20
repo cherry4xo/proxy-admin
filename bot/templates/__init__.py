@@ -51,11 +51,16 @@ def render_bridge_node_config(
     xhttp_host: str = "",
     bridge_xhttp_path: str = _DEFAULT_XHTTP_PATH,
     bridge_xhttp_host: str = "",
+    # Домен-режим: если задан bridge_reality_domain — serverName=домен, dest=локальный nginx.
+    bridge_reality_domain: str | None = None,
+    bridge_reality_dest: str | None = None,
 ) -> str:
     tpl = _env.get_template("bridge_node.json.j2")
     # XHTTP: host должен совпадать с SNI, если явно не задан.
     effective_host = xhttp_host or reality_sni
     bridge_effective_host = bridge_xhttp_host or bridge_reality_sni
+    # Легаси по умолчанию: dest = <bridge_sni>:443 (как было захардкожено в шаблоне).
+    dest = bridge_reality_dest or f"{bridge_reality_sni}:443"
     return tpl.render(
         clients=clients,
         exit_node_ip=exit_node_ip,
@@ -70,4 +75,6 @@ def render_bridge_node_config(
         xhttp_host=effective_host,
         bridge_xhttp_path=bridge_xhttp_path,
         bridge_xhttp_host=bridge_effective_host,
+        bridge_reality_domain=bridge_reality_domain,
+        bridge_reality_dest=dest,
     )

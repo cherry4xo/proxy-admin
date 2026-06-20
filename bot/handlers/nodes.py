@@ -24,6 +24,18 @@ class CreateExitNodeFSM(StatesGroup):
 class CreateBridgeNodeFSM(StatesGroup):
     name = State()
     exit_node_id = State()
+    reality_domain = State()
+
+
+class BridgeDomainFSM(StatesGroup):
+    node_id = State()
+    reality_domain = State()
+
+
+class UploadCertFSM(StatesGroup):
+    domain = State()
+    fullchain = State()
+    privkey = State()
 
 
 class DeleteNodeFSM(StatesGroup):
@@ -234,31 +246,211 @@ async def fsm_bridge_name(message: Message, state: FSMContext) -> None:
 
 
 @router.message(CreateBridgeNodeFSM.exit_node_id)
-async def fsm_bridge_exit_id(message: Message, state: FSMContext, deps: Deps) -> None:
+async def fsm_bridge_exit_id(message: Message, state: FSMContext) -> None:
     try:
         exit_node_id = int(message.text or "")
     except ValueError:
         await message.answer("Введите числовой ID ноды:")
         return
 
+    await state.update_data(exit_node_id=exit_node_id)
+    await message.answer(
+        "Введите свой домен для маскировки REALITY (A-запись должна вести на IP/LB bridge), "
+        "напр. <code>pr.cherry4xo.ru</code>.\n\n"
+        "Или отправьте <code>-</code> чтобы оставить www.microsoft.com (легаси).",
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(CreateBridgeNodeFSM.reality_domain)
+
+
+@router.message(CreateBridgeNodeFSM.reality_domain)
+async def fsm_bridge_domain(message: Message, state: FSMContext, deps: Deps) -> None:
+    raw = (message.text or "").strip()
+    reality_domain = None if raw in ("", "-") else raw
+
     data = await state.get_data()
     name = data["name"]
+    exit_node_id = data["exit_node_id"]
     await state.clear()
 
-    await message.answer(f"Создаю Bridge Node <b>{name}</b> → Exit #{exit_node_id}...", parse_mode="HTML")
+    mode = f"домен {reality_domain}" if reality_domain else "www.microsoft.com (легаси)"
+    await message.answer(
+        f"Создаю Bridge Node <b>{name}</b> → Exit #{exit_node_id}\nМаскировка: {mode}...",
+        parse_mode="HTML",
+    )
 
     try:
-        node = await deps.node_service.create_bridge_node(name=name, exit_node_id=exit_node_id)
+        node = await deps.node_service.create_bridge_node(
+            name=name, exit_node_id=exit_node_id, reality_domain=reality_domain
+        )
+        suffix = ""
+        if reality_domain and node.reality_domain is None:
+            suffix = (
+                "\n⚠️ Сертификат не выпустился — нода поднята на www.microsoft.com. "
+                "Проверь DNS/права SA и используй «🔧 Bridge: настроить домен»."
+            )
         await message.answer(
             f"Bridge Node создана!\n"
             f"ID в БД: <b>{node.id}</b>\n"
-            f"IP: <code>{node.ip}</code>",
+            f"IP: <code>{node.ip}</code>\n"
+            f"SNI: <code>{node.reality_sni}</code>{suffix}",
             reply_markup=back_keyboard(),
             parse_mode="HTML",
         )
     except Exception as e:
         logger.exception("Failed to create bridge node")
         await message.answer(f"Ошибка создания Bridge Node:\n<code>{e}</code>", reply_markup=back_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "node:bridge_domain")
+async def cb_bridge_domain_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID Bridge Node (из БД), которую перевести на свой домен:",
+        reply_markup=back_keyboard(),
+    )
+    await state.set_state(BridgeDomainFSM.node_id)
+    await callback.answer()
+
+
+@router.message(BridgeDomainFSM.node_id)
+async def fsm_bridge_domain_node_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    try:
+        node_id = int(message.text or "")
+    except ValueError:
+        await message.answer("Введите числовой ID:")
+        return
+
+    node = await deps.node_service.get_node(node_id)
+    if not node or node.role != "bridge":
+        await message.answer("Bridge нода не найдена.", reply_markup=back_keyboard())
+        await state.clear()
+        return
+
+    await state.update_data(node_id=node_id)
+    await message.answer(
+        f"Bridge <b>{node.name}</b> (<code>{node.ip}</code>).\n\n"
+        "Введите домен (A-запись уже должна вести на этот IP/LB), напр. <code>pr.cherry4xo.ru</code>:",
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(BridgeDomainFSM.reality_domain)
+
+
+@router.message(BridgeDomainFSM.reality_domain)
+async def fsm_bridge_domain_value(message: Message, state: FSMContext, deps: Deps) -> None:
+    domain = (message.text or "").strip()
+    data = await state.get_data()
+    node_id = data["node_id"]
+    await state.clear()
+
+    if not domain:
+        await message.answer("Пустой домен.", reply_markup=back_keyboard())
+        return
+
+    await message.answer(
+        f"Ставлю nginx+Let's Encrypt и переключаю REALITY на <code>{domain}</code>...\n"
+        "Это займёт ~1 минуту.",
+        parse_mode="HTML",
+    )
+    try:
+        node = await deps.node_service.migrate_bridge_to_domain(node_id, domain)
+        await message.answer(
+            f"Bridge <b>{node.name}</b> переведён на домен <code>{node.reality_sni}</code>.\n"
+            "Клиентские ссылки (через Bridge) теперь используют этот SNI.",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Failed to migrate bridge %d to domain", node_id)
+        await message.answer(
+            f"Ошибка миграции:\n<code>{e}</code>\n\n"
+            "Нода осталась в прежнем состоянии. Если нет сертификата — сначала загрузи его "
+            "(«📜 Загрузить сертификат»).",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+
+
+async def _read_document_text(message: Message) -> str | None:
+    """Скачать прикреплённый документ как текст (PEM). None, если документа нет."""
+    if not message.document:
+        return None
+    file = await message.bot.get_file(message.document.file_id)  # type: ignore[union-attr]
+    content = await message.bot.download_file(file.file_path)  # type: ignore[union-attr]
+    return content.read().decode("utf-8")  # type: ignore[union-attr]
+
+
+@router.callback_query(F.data == "node:upload_cert")
+async def cb_upload_cert_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Загрузка TLS-сертификата для домена bridge.\n\n"
+        "Введите домен (напр. <code>pr.cherry4xo.ru</code>):",
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(UploadCertFSM.domain)
+    await callback.answer()
+
+
+@router.message(UploadCertFSM.domain)
+async def fsm_upload_cert_domain(message: Message, state: FSMContext) -> None:
+    domain = (message.text or "").strip()
+    if not domain:
+        await message.answer("Введите домен текстом:")
+        return
+    await state.update_data(domain=domain)
+    await message.answer(
+        f"Домен: <b>{domain}</b>\n\n"
+        "Пришлите <code>fullchain.pem</code> файлом (полная цепочка сертификата):",
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(UploadCertFSM.fullchain)
+
+
+@router.message(UploadCertFSM.fullchain)
+async def fsm_upload_cert_fullchain(message: Message, state: FSMContext) -> None:
+    text = await _read_document_text(message)
+    if text is None:
+        await message.answer("Пришлите fullchain.pem именно файлом:")
+        return
+    await state.update_data(fullchain=text)
+    await message.answer(
+        "Принял fullchain. Теперь пришлите <code>privkey.pem</code> файлом (приватный ключ):",
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(UploadCertFSM.privkey)
+
+
+@router.message(UploadCertFSM.privkey)
+async def fsm_upload_cert_privkey(message: Message, state: FSMContext, deps: Deps) -> None:
+    text = await _read_document_text(message)
+    if text is None:
+        await message.answer("Пришлите privkey.pem именно файлом:")
+        return
+    data = await state.get_data()
+    domain = data["domain"]
+    fullchain = data["fullchain"]
+    await state.clear()
+
+    try:
+        cert = await deps.cert_service.store_cert(domain, fullchain, text)
+        await message.answer(
+            f"📜 Сертификат для <b>{domain}</b> сохранён.\n"
+            f"Действителен до: <code>{cert.expires_at}</code>\n\n"
+            "Теперь переведи bridge на домен: «🔧 Bridge: настроить домен».",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Failed to store cert for %s", domain)
+        await message.answer(
+            f"Ошибка сохранения сертификата:\n<code>{e}</code>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
 
 
 @router.callback_query(F.data == "node:delete")

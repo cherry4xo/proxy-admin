@@ -12,6 +12,45 @@ _CONFIG_PATH = "/opt/xray/conf/config.json"
 # Xray-core НЕ поддерживает SIGHUP hot-reload — всегда полный рестарт процесса.
 _SYSTEMD_RESTART_CMD = "systemctl restart xray && systemctl is-active --quiet xray"
 
+_TLS_DIR = "/opt/xray/tls"
+
+# nginx на bridge как реальный TLS-таргет для REALITY dest (127.0.0.1:8443).
+# Серт приходит готовым (раскладывается ботом), certbot тут НЕ запускается.
+_BRIDGE_NGINX_SCRIPT = """\
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+DOMAIN="{domain}"
+CERT_DIR="{tls_dir}/${{DOMAIN}}"
+
+apt-get update -y -q
+apt-get install -y -q nginx
+
+test -f "${{CERT_DIR}}/fullchain.pem"
+test -f "${{CERT_DIR}}/privkey.pem"
+
+cat > /etc/nginx/sites-available/reality-${{DOMAIN}}.conf << EOF
+server {{
+    listen 127.0.0.1:8443 ssl;
+    http2 on;
+    server_name ${{DOMAIN}};
+    ssl_certificate     ${{CERT_DIR}}/fullchain.pem;
+    ssl_certificate_key ${{CERT_DIR}}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    location / {{
+        default_type text/html;
+        return 200 '<!doctype html><title>${{DOMAIN}}</title><h1>${{DOMAIN}}</h1>';
+    }}
+}}
+EOF
+ln -sf /etc/nginx/sites-available/reality-${{DOMAIN}}.conf /etc/nginx/sites-enabled/reality-${{DOMAIN}}.conf
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+systemctl enable nginx
+systemctl reload nginx || systemctl restart nginx
+echo "NGINX_TLS_DONE"
+"""
+
 _XRAY_SETUP_SCRIPT = """\
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -165,3 +204,19 @@ class SSHClient:
         stdout, stderr = await self.run_command(_SYSTEMD_RESTART_CMD)
         logger.info("Xray manual restart on %s: %s %s", self._host, stdout.strip(), stderr.strip())
         return stdout or stderr
+
+    async def deploy_tls_cert(self, fullchain: str, privkey: str, domain: str) -> None:
+        cert_dir = f"{_TLS_DIR}/{domain}"
+        await self.run_command(f"mkdir -p {cert_dir} && chmod 700 {_TLS_DIR} {cert_dir}")
+        await self.upload_file(f"{cert_dir}/fullchain.pem", fullchain)
+        await self.upload_file(f"{cert_dir}/privkey.pem", privkey)
+        await self.run_command(f"chmod 600 {cert_dir}/fullchain.pem {cert_dir}/privkey.pem")
+        logger.info("TLS cert for %s deployed to %s", domain, self._host)
+
+    async def setup_bridge_nginx(self, domain: str) -> str:
+        script = _BRIDGE_NGINX_SCRIPT.format(domain=domain, tls_dir=_TLS_DIR)
+        stdout, stderr = await self.run_command(script)
+        if "NGINX_TLS_DONE" not in stdout:
+            raise RuntimeError(f"Bridge nginx setup failed:\n{stderr or stdout}")
+        logger.info("Bridge nginx (%s) ready on %s", domain, self._host)
+        return stdout

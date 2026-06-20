@@ -17,6 +17,7 @@ from bot.services.keygen import (
     generate_uuid,
     generate_x25519_keypair,
 )
+from bot.services.cert_service import CertService
 from bot.services.ssh import SSHClient
 from bot.templates import render_bridge_node_config, render_exit_node_config
 
@@ -31,10 +32,12 @@ class NodeService:
         bitlaunch: BitLaunchClient,
         yandex: YandexClient,
         session_factory: async_sessionmaker[AsyncSession],
+        cert_service: CertService | None = None,
     ) -> None:
         self._bitlaunch = bitlaunch
         self._yandex = yandex
         self._session_factory = session_factory
+        self._cert_service = cert_service
 
     async def _get_or_create_ssh_key(self, session: AsyncSession) -> SSHKey:
         result = await session.execute(select(SSHKey).limit(1))
@@ -286,6 +289,7 @@ class NodeService:
             first_exit_sid = (
                 (exit_node.short_id or "").split(",")[0] if exit_node.short_id else ""
             )
+            bridge_domain = node.reality_domain  # None => легаси microsoft
             config_json = render_bridge_node_config(
                 clients=[{"uuid": u.uuid} for u in users],
                 exit_node_ip=exit_node.ip or "",
@@ -298,6 +302,8 @@ class NodeService:
                 bridge_reality_sni=node.reality_sni or settings.REALITY_SNI,
                 xhttp_host=settings.XHTTP_HOST,
                 bridge_xhttp_host=settings.XHTTP_HOST,
+                bridge_reality_domain=bridge_domain,
+                bridge_reality_dest="127.0.0.1:8443" if bridge_domain else None,
             )
 
         await ssh.deploy_xray_config(config_json, xray_runtime=settings.XRAY_RUNTIME)
@@ -322,6 +328,49 @@ class NodeService:
                 logger.exception(
                     "Failed to redeploy bridge %d after exit %d change", bid, exit_id
                 )
+
+    async def _provision_bridge_tls(self, ssh: SSHClient, domain: str) -> None:
+        """Выпустить (или взять кэш) общий серт домена и развернуть nginx :8443 на bridge.
+
+        Требует cert_service. Бросает исключение при ошибке (ACME/nginx).
+        """
+        if not self._cert_service:
+            raise RuntimeError("CertService not configured — cannot provision domain TLS")
+        fullchain, privkey = await self._cert_service.ensure_cert(domain)
+        await ssh.deploy_tls_cert(fullchain, privkey, domain)
+        await ssh.setup_bridge_nginx(domain)
+
+    async def migrate_bridge_to_domain(self, bridge_node_id: int, reality_domain: str) -> Node:
+        """Перевести существующий bridge на маскировку под свой домен.
+
+        nginx+cert ставятся ДО смены конфига; при ошибке пробрасываем исключение,
+        нода остаётся в текущем (легаси) рабочем состоянии, БД не трогаем.
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(select(Node).where(Node.id == bridge_node_id))
+            node = result.scalar_one_or_none()
+            if not node or node.role != "bridge":
+                raise ValueError(f"Bridge node {bridge_node_id} not found")
+            if not node.ip:
+                raise ValueError(f"Bridge node {bridge_node_id} has no IP")
+            key_result = await session.execute(select(SSHKey).where(SSHKey.id == node.ssh_key_id))
+            ssh_key = key_result.scalar_one()
+
+        ssh = self._make_ssh_client(node, ssh_key)
+        await self._provision_bridge_tls(ssh, reality_domain)
+
+        async with self._session_factory() as session:
+            node = (
+                await session.execute(select(Node).where(Node.id == bridge_node_id))
+            ).scalar_one()
+            node.reality_domain = reality_domain
+            node.reality_sni = reality_domain
+            await session.commit()
+
+        await self.redeploy_node(bridge_node_id)
+        node = await self.get_node(bridge_node_id)
+        assert node is not None
+        return node
 
     async def redeploy_all_nodes(self) -> list[tuple[int, str, Exception | None]]:
         nodes = await self.list_nodes()
@@ -412,6 +461,7 @@ class NodeService:
         self,
         name: str,
         exit_node_id: int,
+        reality_domain: str | None = None,
         zone_id: str | None = None,
         subnet_id: str | None = None,
     ) -> Node:
@@ -441,7 +491,8 @@ class NodeService:
         bridge_uuid = generate_uuid()
         bx_priv, bx_pub = generate_x25519_keypair()
         bridge_short_ids = generate_short_ids()
-        bridge_sni = exit_node.reality_sni or settings.REALITY_SNI
+        # Если задан свой домен — serverName=домен; иначе легаси SNI от exit/microsoft.
+        bridge_sni = reality_domain or exit_node.reality_sni or settings.REALITY_SNI
 
         async with self._session_factory() as session:
             ssh_key = await self._get_or_create_ssh_key(session)
@@ -456,6 +507,7 @@ class NodeService:
                 x25519_public=bx_pub,
                 short_id=",".join(bridge_short_ids),
                 reality_sni=bridge_sni,
+                reality_domain=reality_domain,
                 bridge_uuid=bridge_uuid,
                 xray_api_port=settings.XRAY_API_PORT,
                 status="provisioning",
@@ -468,6 +520,28 @@ class NodeService:
             await session.refresh(node)
 
         ssh = self._make_ssh_client(node, ssh_key)
+
+        # Домен-режим: nginx+cert. При ошибке — graceful fallback на легаси SNI,
+        # нода всё равно поднимется рабочей (на microsoft).
+        effective_domain = reality_domain
+        if reality_domain:
+            try:
+                await self._provision_bridge_tls(ssh, reality_domain)
+            except Exception:
+                logger.exception(
+                    "Bridge TLS setup failed for %s; fallback to legacy SNI %s",
+                    reality_domain, settings.REALITY_SNI,
+                )
+                effective_domain = None
+                bridge_sni = exit_node.reality_sni or settings.REALITY_SNI
+                async with self._session_factory() as session:
+                    n = (
+                        await session.execute(select(Node).where(Node.id == node.id))
+                    ).scalar_one()
+                    n.reality_domain = None
+                    n.reality_sni = bridge_sni
+                    await session.commit()
+
         users = await self._get_node_users(exit_node)
         first_short_id = (exit_node.short_id or "").split(",")[0] if exit_node.short_id else ""
         config_json = render_bridge_node_config(
@@ -482,6 +556,8 @@ class NodeService:
             bridge_reality_sni=bridge_sni,
             xhttp_host=settings.XHTTP_HOST,
             bridge_xhttp_host=settings.XHTTP_HOST,
+            bridge_reality_domain=effective_domain,
+            bridge_reality_dest="127.0.0.1:8443" if effective_domain else None,
         )
         await ssh.deploy_xray_config(config_json, xray_runtime=settings.XRAY_RUNTIME)
 

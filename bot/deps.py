@@ -4,6 +4,7 @@ from bot.config import settings
 from bot.database.base import async_session_factory
 from bot.services.cloud.bitlaunch import BitLaunchClient
 from bot.services.cloud.yandex import YandexClient
+from bot.services.cert_service import CertService
 from bot.services.cloud.yandex_iam import IamTokenProvider, ServiceAccountKey
 from bot.services.cloud.yandex_nlb import YandexNLBClient
 from bot.services.node_service import NodeService
@@ -17,6 +18,7 @@ class Deps:
     bitlaunch: BitLaunchClient
     yandex: YandexClient
     nlb: YandexNLBClient
+    cert_service: CertService
 
 
 def build_deps() -> Deps:
@@ -40,10 +42,12 @@ def build_deps() -> Deps:
         iam_provider=iam_provider,
         verify_ssl=settings.HTTPX_VERIFY,
     )
+    cert_service = CertService(session_factory=async_session_factory)
     node_service = NodeService(
         bitlaunch=bitlaunch,
         yandex=yandex,
         session_factory=async_session_factory,
+        cert_service=cert_service,
     )
     user_service = UserService(
         session_factory=async_session_factory,
@@ -55,4 +59,5 @@ def build_deps() -> Deps:
         bitlaunch=bitlaunch,
         yandex=yandex,
         nlb=nlb,
+        cert_service=cert_service,
     )

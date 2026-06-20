@@ -17,6 +17,10 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🔗 Привязать Bridge → Exit", callback_data="node:link"),
     )
     builder.row(
+        InlineKeyboardButton(text="📜 Загрузить сертификат", callback_data="node:upload_cert"),
+        InlineKeyboardButton(text="🔧 Bridge: настроить домен", callback_data="node:bridge_domain"),
+    )
+    builder.row(
         InlineKeyboardButton(text="🔄 Пересоздать Bridge (смена IP)", callback_data="node:recreate_bridge"),
         InlineKeyboardButton(text="❌ Удалить ноду", callback_data="node:delete"),
     )

@@ -42,6 +42,11 @@ class Node(Base):
     # Bridge-only: единый VLESS uuid, которым Bridge аутентифицируется на Exit.
     bridge_uuid: Mapped[str | None] = mapped_column(String, nullable=True)
 
+    # Bridge-only: если задан — клиент-плечо REALITY маскируется под СВОЙ домен
+    # (локальный nginx :8443 как dest), serverName=reality_sni=этот домен.
+    # NULL => легаси (www.microsoft.com, dest=<sni>:443).
+    reality_domain: Mapped[str | None] = mapped_column(String, nullable=True)
+
     xray_api_port: Mapped[int] = mapped_column(Integer, default=8080)
     status: Mapped[str] = mapped_column(String, default="provisioning")
     # "provisioning" | "active" | "blocked" | "deleting"
@@ -85,3 +90,16 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class Certificate(Base):
+    __tablename__ = "certificates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    domain: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # PEM, зашифрованы Fernet (ENCRYPTION_KEY из .env) — один общий серт на домен,
+    # раскладывается по всем bridge-нодам этого домена.
+    fullchain_encrypted: Mapped[str] = mapped_column(String, nullable=False)
+    privkey_encrypted: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
