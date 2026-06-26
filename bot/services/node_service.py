@@ -6,7 +6,7 @@ from sqlalchemy import delete as sql_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot.config import settings
-from bot.database.models import Node, NodeLink, SSHKey, User
+from bot.database.models import Node, NodeLink, SSHKey, User, UserNode
 from bot.services.cloud.bitlaunch import BitLaunchClient
 from bot.services.cloud.yandex import YandexClient
 from bot.services.keygen import (
@@ -59,11 +59,36 @@ class NodeService:
         return SSHClient(node.ip or "", node.ssh_port, ssh_key.private_key_encrypted)
 
     async def _get_node_users(self, node: Node) -> list[User]:
+        # M:N: юзеры этой exit-ноды по таблице user_nodes (юзер может быть на нескольких exit).
         async with self._session_factory() as session:
             result = await session.execute(
-                select(User).where(User.exit_node_id == node.id, User.is_active == True)
+                select(User)
+                .join(UserNode, UserNode.user_id == User.id)
+                .where(UserNode.exit_node_id == node.id, User.is_active.is_(True))
             )
             return list(result.scalars().all())
+
+    async def backfill_user_nodes(self) -> int:
+        """Засеять user_nodes для старых юзеров (по их exit_node_id), если строки нет.
+
+        Идемпотентно. Вызвать ОДИН раз перед первым M:N-redeploy, иначе старые юзера
+        выпадут из конфигов exit. Возвращает число добавленных строк.
+        """
+        added = 0
+        async with self._session_factory() as session:
+            users = (await session.execute(select(User))).scalars().all()
+            existing = {
+                (un.user_id, un.exit_node_id)
+                for un in (await session.execute(select(UserNode))).scalars().all()
+            }
+            for user in users:
+                if (user.id, user.exit_node_id) not in existing:
+                    session.add(UserNode(user_id=user.id, exit_node_id=user.exit_node_id))
+                    added += 1
+            if added:
+                await session.commit()
+        logger.info("backfill_user_nodes: %d rows added", added)
+        return added
 
     async def list_nodes(self) -> list[Node]:
         async with self._session_factory() as session:
@@ -155,7 +180,7 @@ class NodeService:
             ssh_key = key_result.scalar_one()
 
         ssh = self._make_ssh_client(node, ssh_key)
-        await ssh.setup_xray(api_port=node.xray_api_port)
+        await ssh.setup_xray(api_port=node.xray_api_port, xray_version=settings.XRAY_VERSION)
         logger.info("Node %d xray installed", node_id)
 
         if node.role == "exit":
@@ -258,6 +283,11 @@ class NodeService:
                 client_uuids += [bu for (bu,) in bridge_rows.all() if bu]
             x25519_priv = decrypt(node.x25519_private_encrypted)
             short_ids = (node.short_id or "").split(",") if node.short_id else generate_short_ids()
+            warp_secret = (
+                decrypt(node.warp_secret_key_encrypted)
+                if node.warp_enabled and node.warp_secret_key_encrypted
+                else ""
+            )
             config_json = render_exit_node_config(
                 clients=[{"uuid": u} for u in client_uuids],
                 x25519_private=x25519_priv,
@@ -265,6 +295,10 @@ class NodeService:
                 reality_sni=node.reality_sni or settings.REALITY_SNI,
                 xray_api_port=node.xray_api_port,
                 xhttp_host=settings.XHTTP_HOST,
+                warp_enabled=node.warp_enabled,
+                warp_secret_key=warp_secret,
+                warp_address=(node.warp_address or "").split(",") if node.warp_address else [],
+                warp_reserved=node.warp_reserved or "0,0,0",
             )
         else:
             async with self._session_factory() as session:
@@ -304,6 +338,7 @@ class NodeService:
                 bridge_xhttp_host=settings.XHTTP_HOST,
                 bridge_reality_domain=bridge_domain,
                 bridge_reality_dest="127.0.0.1:8443" if bridge_domain else None,
+                fingerprint=settings.FINGERPRINT,
             )
 
         await ssh.deploy_xray_config(config_json, xray_runtime=settings.XRAY_RUNTIME)
@@ -370,6 +405,56 @@ class NodeService:
         await self.redeploy_node(bridge_node_id)
         node = await self.get_node(bridge_node_id)
         assert node is not None
+        return node
+
+    async def provision_warp(self, node_id: int) -> Node:
+        """Включить Cloudflare WARP на exit-ноде (внутренний wireguard-outbound).
+
+        Генерит WARP-профиль на ноде через wgcf, шифрует secretKey, пишет warp_*
+        поля + warp_enabled=True и передеплоивает exit. Идемпотентно — повторный
+        вызов перегенерит профиль (WARP IP — лотерея).
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(select(Node).where(Node.id == node_id))
+            node = result.scalar_one_or_none()
+            if not node or node.role != "exit":
+                raise ValueError(f"Exit node {node_id} not found")
+            if not node.ip:
+                raise ValueError(f"Exit node {node_id} has no IP")
+            key_result = await session.execute(select(SSHKey).where(SSHKey.id == node.ssh_key_id))
+            ssh_key = key_result.scalar_one()
+
+        ssh = self._make_ssh_client(node, ssh_key)
+        profile = await ssh.setup_warp(wgcf_version=settings.WGCF_VERSION)
+
+        async with self._session_factory() as session:
+            node = (await session.execute(select(Node).where(Node.id == node_id))).scalar_one()
+            node.warp_secret_key_encrypted = encrypt(str(profile["secret_key"]))
+            node.warp_address = ",".join(profile["address"])  # type: ignore[arg-type]
+            node.warp_reserved = str(profile["reserved"])
+            node.warp_enabled = True
+            await session.commit()
+
+        await self.redeploy_node(node_id)
+        node = await self.get_node(node_id)
+        assert node is not None
+        logger.info("WARP enabled on exit node %d", node_id)
+        return node
+
+    async def disable_warp(self, node_id: int) -> Node:
+        """Выключить WARP на exit-ноде (откат на прямой freedom) и передеплоить."""
+        async with self._session_factory() as session:
+            result = await session.execute(select(Node).where(Node.id == node_id))
+            node = result.scalar_one_or_none()
+            if not node or node.role != "exit":
+                raise ValueError(f"Exit node {node_id} not found")
+            node.warp_enabled = False
+            await session.commit()
+
+        await self.redeploy_node(node_id)
+        node = await self.get_node(node_id)
+        assert node is not None
+        logger.info("WARP disabled on exit node %d", node_id)
         return node
 
     async def redeploy_all_nodes(self) -> list[tuple[int, str, Exception | None]]:
@@ -558,6 +643,7 @@ class NodeService:
             bridge_xhttp_host=settings.XHTTP_HOST,
             bridge_reality_domain=effective_domain,
             bridge_reality_dest="127.0.0.1:8443" if effective_domain else None,
+            fingerprint=settings.FINGERPRINT,
         )
         await ssh.deploy_xray_config(config_json, xray_runtime=settings.XRAY_RUNTIME)
 

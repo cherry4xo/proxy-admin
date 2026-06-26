@@ -1,3 +1,4 @@
+import base64
 import io
 import logging
 from typing import TYPE_CHECKING
@@ -9,8 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot.config import settings
-from bot.database.models import Node, NodeLink, SSHKey, User
-from bot.services.keygen import generate_uuid
+from bot.database.models import Node, NodeLink, SSHKey, User, UserNode
+from bot.services.keygen import generate_subscription_token, generate_uuid
 from bot.services.ssh import SSHClient
 from bot.services.xray_api import XrayApiClient
 
@@ -47,9 +48,10 @@ class UserService:
             "encryption=none",
             "security=reality",
             f"sni={reality_sni}",
-            "fp=chrome",
+            f"fp={settings.FINGERPRINT}",
             f"pbk={x25519_public}",
             f"sid={first_short_id}",
+            "spx=%2F",  # spiderX=/ — улучшает мимикрию REALITY-handshake
             "type=xhttp",
             f"path={quote(xhttp_path)}",
             f"host={effective_host}",
@@ -105,6 +107,150 @@ class UserService:
             if self._node_service:
                 await self._node_service.redeploy_exit_with_bridges(exit_node.id)
 
+    async def _get_node_with_key(self, node_id: int) -> tuple[Node | None, SSHKey | None]:
+        async with self._session_factory() as session:
+            node = (
+                await session.execute(select(Node).where(Node.id == node_id))
+            ).scalar_one_or_none()
+            if not node:
+                return None, None
+            key = (
+                await session.execute(select(SSHKey).where(SSHKey.id == node.ssh_key_id))
+            ).scalar_one_or_none()
+            return node, key
+
+    async def get_user_nodes(self, user_id: int) -> list[Node]:
+        """Все exit-ноды юзера (из user_nodes). Лениво засеивает первичный exit, если
+        таблица пуста для этого юзера (backfill для старых юзеров)."""
+        async with self._session_factory() as session:
+            user = (
+                await session.execute(select(User).where(User.id == user_id))
+            ).scalar_one_or_none()
+            if not user:
+                raise ValueError(f"User {user_id} not found")
+            rows = await session.execute(
+                select(Node)
+                .join(UserNode, UserNode.exit_node_id == Node.id)
+                .where(UserNode.user_id == user_id)
+            )
+            nodes = list(rows.scalars().all())
+            if not nodes:
+                # backfill: старый юзер без строк user_nodes — досоздать по exit_node_id
+                session.add(UserNode(user_id=user_id, exit_node_id=user.exit_node_id))
+                await session.commit()
+                primary = (
+                    await session.execute(select(Node).where(Node.id == user.exit_node_id))
+                ).scalar_one_or_none()
+                nodes = [primary] if primary else []
+            return nodes
+
+    async def build_user_links(self, user_id: int) -> list[tuple[str, str]]:
+        """Все VLESS-ссылки юзера: по каждой его exit-ноде — прямая + bridge (если есть).
+
+        Возвращает [(remark, vless_url), ...]. Переиспользует _build_vless_url.
+        """
+        nodes = await self.get_user_nodes(user_id)
+        async with self._session_factory() as session:
+            user = (
+                await session.execute(select(User).where(User.id == user_id))
+            ).scalar_one()
+            links: list[tuple[str, str]] = []
+            for exit_node in nodes:
+                if exit_node.ip and exit_node.x25519_public:
+                    remark = f"{user.name} · {exit_node.name}"
+                    links.append((remark, self._build_vless_url(
+                        user_uuid=user.uuid,
+                        exit_node_ip=exit_node.ip,
+                        x25519_public=exit_node.x25519_public,
+                        short_id=exit_node.short_id or "",
+                        reality_sni=exit_node.reality_sni or settings.REALITY_SNI,
+                        remark=remark,
+                        xhttp_host=settings.XHTTP_HOST,
+                    )))
+                # bridge(ы), привязанные к этой exit-ноде
+                bridge_rows = await session.execute(
+                    select(Node)
+                    .join(NodeLink, NodeLink.bridge_id == Node.id)
+                    .where(NodeLink.exit_id == exit_node.id, Node.role == "bridge")
+                )
+                for bridge in bridge_rows.scalars().all():
+                    if not bridge.ip or not bridge.x25519_public:
+                        continue
+                    bremark = f"{user.name} · {bridge.name} (bridge)"
+                    links.append((bremark, self._build_vless_url(
+                        user_uuid=user.uuid,
+                        exit_node_ip=bridge.ip,
+                        x25519_public=bridge.x25519_public,
+                        short_id=bridge.short_id or "",
+                        reality_sni=bridge.reality_sni or settings.REALITY_SNI,
+                        remark=bremark,
+                        xhttp_host=settings.XHTTP_HOST,
+                    )))
+            return links
+
+    async def get_subscription_payload(self, token: str) -> tuple[str, dict[str, str]] | None:
+        """По subscription-токену собрать base64-подписку + заголовки Hiddify/Happ.
+
+        Возвращает None, если токен неизвестен или юзер неактивен (→ 404).
+        """
+        if not token:
+            return None
+        async with self._session_factory() as session:
+            user = (
+                await session.execute(
+                    select(User).where(User.subscription_token == token)
+                )
+            ).scalar_one_or_none()
+            if not user or not user.is_active:
+                return None
+            user_id, user_name = user.id, user.name
+
+        links = await self.build_user_links(user_id)
+        body = "\n".join(url for _, url in links)
+        body_b64 = base64.b64encode(body.encode()).decode()
+
+        title_b64 = base64.b64encode(f"{user_name} proxy".encode()).decode()
+        headers = {
+            "Profile-Title": f"base64:{title_b64}",
+            "Profile-Update-Interval": str(settings.SUB_UPDATE_INTERVAL_H),
+            "Subscription-Userinfo": "upload=0; download=0; total=0; expire=0",
+        }
+        return body_b64, headers
+
+    async def ensure_subscription(self, user_id: int) -> str:
+        """Вернуть полный subscription-URL юзера (сгенерить токен, если нет)."""
+        async with self._session_factory() as session:
+            user = (
+                await session.execute(select(User).where(User.id == user_id))
+            ).scalar_one_or_none()
+            if not user:
+                raise ValueError(f"User {user_id} not found")
+            if not user.subscription_token:
+                user.subscription_token = generate_subscription_token()
+                await session.commit()
+                await session.refresh(user)
+            token = user.subscription_token
+        return self._subscription_url(token)
+
+    async def rotate_subscription(self, user_id: int) -> str:
+        """Перевыпустить токен (старый URL перестаёт работать)."""
+        async with self._session_factory() as session:
+            user = (
+                await session.execute(select(User).where(User.id == user_id))
+            ).scalar_one_or_none()
+            if not user:
+                raise ValueError(f"User {user_id} not found")
+            user.subscription_token = generate_subscription_token()
+            await session.commit()
+            await session.refresh(user)
+            token = user.subscription_token
+        return self._subscription_url(token)
+
+    @staticmethod
+    def _subscription_url(token: str) -> str:
+        base = settings.SUB_URL_BASE.rstrip("/")
+        return f"{base}/sub/{token}"
+
     async def list_users(self, exit_node_id: int | None = None) -> list[User]:
         async with self._session_factory() as session:
             query = select(User)
@@ -118,7 +264,13 @@ class UserService:
         name: str,
         exit_node_id: int,
         telegram_id: int | None = None,
+        extra_exit_ids: list[int] | None = None,
     ) -> tuple[User, str, bytes, str | None, bytes | None]:
+        # Полный набор exit для юзера: первичный + дополнительные (для подписки).
+        all_exit_ids = [exit_node_id] + [
+            e for e in (extra_exit_ids or []) if e != exit_node_id
+        ]
+
         async with self._session_factory() as session:
             node_result = await session.execute(select(Node).where(Node.id == exit_node_id))
             exit_node = node_result.scalar_one_or_none()
@@ -140,13 +292,20 @@ class UserService:
                 exit_node_id=exit_node_id,
                 telegram_id=telegram_id,
                 is_active=True,
+                subscription_token=generate_subscription_token(),
             )
             session.add(user)
+            await session.flush()
+            for eid in all_exit_ids:
+                session.add(UserNode(user_id=user.id, exit_node_id=eid))
             await session.commit()
             await session.refresh(user)
 
-        # Горячее добавление без рестарта (fallback на redeploy внутри хелпера).
-        await self._add_user_to_running_nodes(exit_node, ssh_key, user_uuid)
+        # Горячее добавление без рестарта на КАЖДУЮ exit-ноду (+ её bridge).
+        for eid in all_exit_ids:
+            node, key = await self._get_node_with_key(eid)
+            if node and key and node.ip:
+                await self._add_user_to_running_nodes(node, key, user_uuid)
 
         vless_url = self._build_vless_url(
             user_uuid=user_uuid,
@@ -235,24 +394,35 @@ class UserService:
             user = result.scalar_one_or_none()
             if not user:
                 raise ValueError(f"User {user_id} not found")
+            user_uuid = user.uuid
 
-            node_result = await session.execute(select(Node).where(Node.id == user.exit_node_id))
-            exit_node = node_result.scalar_one()
-
-            key_result = await session.execute(select(SSHKey).where(SSHKey.id == exit_node.ssh_key_id))
-            ssh_key = key_result.scalar_one()
-
-        xray = self._make_xray_client(exit_node, ssh_key)
-        await xray.remove_user("inbound-vless", user.uuid)
+        # Все exit-ноды юзера (M:N) — снять uuid с каждой (+ bridge через redeploy fallback).
+        exit_nodes = await self.get_user_nodes(user_id)
+        exit_ids = [n.id for n in exit_nodes]
+        for node in exit_nodes:
+            _, key = await self._get_node_with_key(node.id)
+            if key and node.ip:
+                try:
+                    xray = self._make_xray_client(node, key)
+                    await xray.remove_user("inbound-vless", user_uuid)
+                except Exception:
+                    logger.exception("remove_user failed on node %d", node.id)
 
         async with self._session_factory() as session:
             result = await session.execute(select(User).where(User.id == user_id))
             user = result.scalar_one()
             if delete_from_db:
+                # Сначала чистим M:N-строки (нет каскада во избежание FK-сирот).
+                links = await session.execute(
+                    select(UserNode).where(UserNode.user_id == user_id)
+                )
+                for ln in links.scalars().all():
+                    await session.delete(ln)
                 await session.delete(user)
             else:
                 user.is_active = False
             await session.commit()
 
         if self._node_service:
-            await self._node_service.redeploy_exit_with_bridges(exit_node.id)
+            for eid in exit_ids:
+                await self._node_service.redeploy_exit_with_bridges(eid)

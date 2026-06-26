@@ -15,3 +15,21 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=sqlite+aiosqlite:////app/data/proxy.db
+
+  # Read-only сервер подписки. Тот же образ, другой command. Читает ту же proxy.db
+  # через общий volume ./data. Наружу — только через nginx/поддомен (порт на 127.0.0.1).
+  subscription:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "bot.web.subscription"]
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/proxy.db
+    ports:
+      - "127.0.0.1:8008:8008"

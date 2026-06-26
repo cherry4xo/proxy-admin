@@ -20,6 +20,12 @@ def render_exit_node_config(
     xray_api_port: int = 8080,
     xhttp_path: str = _DEFAULT_XHTTP_PATH,
     xhttp_host: str = "",
+    # WARP (опционально): весь исходящий через wireguard-outbound к Cloudflare,
+    # с fallback на direct через balancer+observatory.
+    warp_enabled: bool = False,
+    warp_secret_key: str = "",
+    warp_address: list[str] | None = None,
+    warp_reserved: str = "0,0,0",
 ) -> str:
     tpl = _env.get_template("exit_node.json.j2")
     # xhttp_host: явный параметр > SNI (для XHTTP: host должен совпадать с SNI)
@@ -32,6 +38,10 @@ def render_exit_node_config(
         xray_api_port=xray_api_port,
         xhttp_path=xhttp_path,
         xhttp_host=effective_host,
+        warp_enabled=warp_enabled,
+        warp_secret_key=warp_secret_key,
+        warp_address=warp_address or [],
+        warp_reserved=warp_reserved or "0,0,0",
     )
 
 
@@ -54,6 +64,8 @@ def render_bridge_node_config(
     # Домен-режим: если задан bridge_reality_domain — serverName=домен, dest=локальный nginx.
     bridge_reality_domain: str | None = None,
     bridge_reality_dest: str | None = None,
+    # uTLS fingerprint для плеча bridge→exit (REALITY-клиент).
+    fingerprint: str = "chrome",
 ) -> str:
     tpl = _env.get_template("bridge_node.json.j2")
     # XHTTP: host должен совпадать с SNI, если явно не задан.
@@ -77,4 +89,5 @@ def render_bridge_node_config(
         bridge_xhttp_host=bridge_effective_host,
         bridge_reality_domain=bridge_reality_domain,
         bridge_reality_dest=dest,
+        fingerprint=fingerprint,
     )

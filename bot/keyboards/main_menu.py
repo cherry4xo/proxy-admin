@@ -50,6 +50,10 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="♻️ Перезапустить Xray", callback_data="node:restart_xray"),
     )
     builder.row(
+        InlineKeyboardButton(text="☁️ WARP вкл (Exit)", callback_data="node:warp_on"),
+        InlineKeyboardButton(text="🚫 WARP выкл (Exit)", callback_data="node:warp_off"),
+    )
+    builder.row(
         InlineKeyboardButton(text="🌐 BitLaunch (live)", callback_data="node:list_bitlaunch"),
         InlineKeyboardButton(text="🌐 Yandex Cloud (live)", callback_data="node:list_yandex"),
     )
@@ -92,6 +96,10 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(text="🌉 Конфиг (через Bridge)", callback_data="user:get_bridge_config"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🔗 Subscription-ссылка", callback_data="user:subscription"),
+        InlineKeyboardButton(text="♻️ Перевыпустить подписку", callback_data="user:rotate_sub"),
     )
 
     return builder.as_markup()

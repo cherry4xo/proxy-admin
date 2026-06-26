@@ -97,6 +97,49 @@ async def test_setup_bridge_nginx_raises_without_marker(ssh_client: SSHClient, m
 
 
 @pytest.mark.asyncio
+async def test_setup_xray_pins_version_in_script(ssh_client: SSHClient, mocker):
+    mocker.patch.object(ssh_client, "run_command", return_value=("SETUP_DONE", ""))
+
+    await ssh_client.setup_xray(api_port=8080, xray_version="v25.12.8")
+
+    script = ssh_client.run_command.call_args.args[0]
+    # Версия ядра запинена, динамического fetch tag_name быть не должно
+    # (releases/latest для geosite/geoip — это данные, оставлены намеренно).
+    assert 'XRAY_VER="v25.12.8"' in script
+    assert "Xray-core/releases/latest" not in script
+    assert "tag_name" not in script
+
+
+@pytest.mark.asyncio
+async def test_setup_warp_parses_profile(ssh_client: SSHClient, mocker):
+    stdout = "\n".join(
+        [
+            "WARP_PRIV=cPrivKeyBase64==",
+            "WARP_ADDR=172.16.0.2/32,2606:4700:110::2/128",
+            "WARP_DONE",
+        ]
+    )
+    mocker.patch.object(ssh_client, "run_command", return_value=(stdout, ""))
+
+    profile = await ssh_client.setup_warp(wgcf_version="2.2.22")
+
+    assert profile["secret_key"] == "cPrivKeyBase64=="
+    assert profile["address"] == ["172.16.0.2/32", "2606:4700:110::2/128"]
+    assert profile["reserved"] == "0,0,0"
+    script = ssh_client.run_command.call_args.args[0]
+    assert "2.2.22" in script
+    assert "wgcf" in script
+
+
+@pytest.mark.asyncio
+async def test_setup_warp_raises_without_marker(ssh_client: SSHClient, mocker):
+    mocker.patch.object(ssh_client, "run_command", return_value=("", "wgcf: error"))
+
+    with pytest.raises(RuntimeError, match="WARP setup failed"):
+        await ssh_client.setup_warp()
+
+
+@pytest.mark.asyncio
 async def test_run_command_returns_stdout_stderr_on_nonzero_exit(ssh_client: SSHClient, mocker):
     mock_result = mocker.Mock()
     mock_result.stdout = "out"

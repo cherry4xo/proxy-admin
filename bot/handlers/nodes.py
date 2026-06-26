@@ -19,6 +19,8 @@ class CreateExitNodeFSM(StatesGroup):
     name = State()
     region = State()
     size = State()
+    sni = State()
+    sni_custom = State()
 
 
 class CreateBridgeNodeFSM(StatesGroup):
@@ -77,6 +79,14 @@ class XrayStatusFSM(StatesGroup):
 
 
 class RestartXrayFSM(StatesGroup):
+    node_id = State()
+
+
+class WarpOnFSM(StatesGroup):
+    node_id = State()
+
+
+class WarpOffFSM(StatesGroup):
     node_id = State()
 
 
@@ -192,16 +202,34 @@ async def fsm_exit_region(message: Message, state: FSMContext) -> None:
 
 
 @router.message(CreateExitNodeFSM.size)
-async def fsm_exit_size(message: Message, state: FSMContext, deps: Deps) -> None:
+async def fsm_exit_size(message: Message, state: FSMContext) -> None:
+    await state.update_data(size=message.text or "")
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="dl.google.com (реком.)", callback_data="exitsni:dl.google.com"))
+    builder.row(InlineKeyboardButton(text="swcdn.apple.com", callback_data="exitsni:swcdn.apple.com"))
+    builder.row(InlineKeyboardButton(text="✏️ Свой домен", callback_data="exitsni:custom"))
+    builder.row(InlineKeyboardButton(text="« Главное меню", callback_data="menu:main"))
+    await message.answer(
+        "Выберите REALITY-донор (SNI/dest) для маскировки.\n"
+        "Критерии: TLS1.3+H2, не редирект, IP вне РФ. <code>dl.google.com</code> — эталон XTLS.",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+    await state.set_state(CreateExitNodeFSM.sni)
+
+
+async def _create_exit_with_sni(
+    message: Message, state: FSMContext, deps: Deps, sni: str
+) -> None:
     data = await state.get_data()
     name = data["name"]
     region = data["region"]
-    size = message.text or ""
+    size = data["size"]
     await state.clear()
 
     await message.answer(
         f"Создаю Exit Node...\n"
-        f"Имя: <b>{name}</b> | Регион: <b>{region}</b> | Тариф: <b>{size}</b>\n\n"
+        f"Имя: <b>{name}</b> | Регион: <b>{region}</b> | Тариф: <b>{size}</b> | SNI: <code>{sni}</code>\n\n"
         "Это займёт 1-2 минуты.",
         parse_mode="HTML",
     )
@@ -212,11 +240,13 @@ async def fsm_exit_size(message: Message, state: FSMContext, deps: Deps) -> None
             image_id="10000",
             size_id=size,
             region_id=region,
+            reality_sni=sni,
         )
         await message.answer(
             f"Exit Node создана!\n"
             f"ID в БД: <b>{node.id}</b>\n"
             f"IP: <code>{node.ip}</code>\n"
+            f"SNI: <code>{node.reality_sni}</code>\n"
             f"Public key (X25519): <code>{node.x25519_public}</code>\n"
             f"Short ID: <code>{node.short_id}</code>",
             reply_markup=back_keyboard(),
@@ -225,6 +255,31 @@ async def fsm_exit_size(message: Message, state: FSMContext, deps: Deps) -> None
     except Exception as e:
         logger.exception("Failed to create exit node")
         await message.answer(f"Ошибка создания Exit Node:\n<code>{e}</code>", reply_markup=back_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(CreateExitNodeFSM.sni, F.data.startswith("exitsni:"))
+async def cb_exit_sni_choice(callback: CallbackQuery, state: FSMContext, deps: Deps) -> None:
+    choice = (callback.data or "").split(":", 1)[1]
+    await callback.answer()
+    if choice == "custom":
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            "Введите свой домен-донор (напр. <code>swdist.apple.com</code>). "
+            "Должен поддерживать TLS1.3+H2 и быть вне РФ:",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+        await state.set_state(CreateExitNodeFSM.sni_custom)
+        return
+    await _create_exit_with_sni(callback.message, state, deps, choice)  # type: ignore[arg-type]
+
+
+@router.message(CreateExitNodeFSM.sni_custom)
+async def fsm_exit_sni_custom(message: Message, state: FSMContext, deps: Deps) -> None:
+    sni = (message.text or "").strip()
+    if not sni or " " in sni or "." not in sni:
+        await message.answer("Введите корректный домен (без пробелов, с точкой):")
+        return
+    await _create_exit_with_sni(message, state, deps, sni)
 
 
 @router.callback_query(F.data == "node:create_bridge")
@@ -1118,6 +1173,84 @@ async def fsm_restart_xray_node_id(message: Message, state: FSMContext, deps: De
         )
     except Exception as e:
         logger.exception("Failed to restart xray for node %d", node_id)
+        await message.answer(
+            f"Ошибка:\n<code>{e}</code>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(F.data == "node:warp_on")
+async def cb_warp_on_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID <b>exit</b>-ноды для включения WARP "
+        "(весь исходящий трафик через Cloudflare, fallback на direct):",
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(WarpOnFSM.node_id)
+    await callback.answer()
+
+
+@router.message(WarpOnFSM.node_id)
+async def fsm_warp_on_node_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    try:
+        node_id = int(message.text or "")
+    except ValueError:
+        await message.answer("Введите числовой ID:")
+        return
+
+    await state.clear()
+    await message.answer("Генерирую WARP-профиль и передеплоиваю exit (это займёт ~минуту)...")
+
+    try:
+        node = await deps.node_service.provision_warp(node_id)
+        await message.answer(
+            f"☁️ WARP включён на <b>{node.name}</b>.\n"
+            "Весь исходящий трафик exit идёт через Cloudflare (fallback: direct при сбое пира).",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Failed to enable WARP for node %d", node_id)
+        await message.answer(
+            f"Ошибка:\n<code>{e}</code>",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(F.data == "node:warp_off")
+async def cb_warp_off_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID <b>exit</b>-ноды для выключения WARP (откат на прямой выход):",
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(WarpOffFSM.node_id)
+    await callback.answer()
+
+
+@router.message(WarpOffFSM.node_id)
+async def fsm_warp_off_node_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    try:
+        node_id = int(message.text or "")
+    except ValueError:
+        await message.answer("Введите числовой ID:")
+        return
+
+    await state.clear()
+    await message.answer("Выключаю WARP и передеплоиваю exit...")
+
+    try:
+        node = await deps.node_service.disable_warp(node_id)
+        await message.answer(
+            f"🚫 WARP выключен на <b>{node.name}</b>. Трафик идёт напрямую (freedom).",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Failed to disable WARP for node %d", node_id)
         await message.answer(
             f"Ошибка:\n<code>{e}</code>",
             reply_markup=back_keyboard(),

@@ -33,11 +33,7 @@
           "show": false,
           "dest": "{{ bridge_reality_dest }}",
           "xver": 0,
-{% if bridge_reality_domain %}
           "serverNames": ["{{ bridge_reality_sni }}"],
-{% else %}
-          "serverNames": ["{{ bridge_reality_sni }}"{% if not bridge_reality_sni.startswith('www.') %}, "www.{{ bridge_reality_sni }}"{% endif %}],
-{% endif %}
           "privateKey": "{{ bridge_x25519_private }}",
           "shortIds": [{% for sid in bridge_short_ids %}"{{ sid }}"{% if not loop.last %}, {% endif %}{% endfor %}]
         },
@@ -78,9 +74,10 @@
         "security": "reality",
         "realitySettings": {
           "serverName": "{{ reality_sni }}",
-          "fingerprint": "chrome",
+          "fingerprint": "{{ fingerprint }}",
           "publicKey": "{{ x25519_public }}",
-          "shortId": "{{ short_id }}"
+          "shortId": "{{ short_id }}",
+          "spiderX": "/"
         },
         "xhttpSettings": {
           "path": "{{ xhttp_path }}",

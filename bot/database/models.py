@@ -47,6 +47,14 @@ class Node(Base):
     # NULL => легаси (www.microsoft.com, dest=<sni>:443).
     reality_domain: Mapped[str | None] = mapped_column(String, nullable=True)
 
+    # Exit-only: Cloudflare WARP как ВНУТРЕННИЙ wireguard-outbound (прячет IP подсети ноды
+    # от конечных сайтов + разблок AI). secretKey зашифрован Fernet; address — "v4/32,v6/128";
+    # reserved — 3 байта "a,b,c". Наружу смотрит REALITY, WARP не на периметре.
+    warp_secret_key_encrypted: Mapped[str | None] = mapped_column(String, nullable=True)
+    warp_address: Mapped[str | None] = mapped_column(String, nullable=True)
+    warp_reserved: Mapped[str | None] = mapped_column(String, nullable=True)
+    warp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+
     xray_api_port: Mapped[int] = mapped_column(Integer, default=8080)
     status: Mapped[str] = mapped_column(String, default="provisioning")
     # "provisioning" | "active" | "blocked" | "deleting"
@@ -90,6 +98,24 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Секретный токен для subscription-URL (secrets.token_urlsafe). NULL => подписка не выдавалась.
+    subscription_token: Mapped[str | None] = mapped_column(String, unique=True, nullable=True)
+
+
+class UserNode(Base):
+    """M:N: на каких exit-нодах присутствует юзер (его uuid в их inbound).
+
+    Дополняет User.exit_node_id (первичный exit). Подписка собирает ссылки по
+    всем строкам этой таблицы для юзера.
+    """
+
+    __tablename__ = "user_nodes"
+    __table_args__ = (UniqueConstraint("user_id", "exit_node_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    exit_node_id: Mapped[int] = mapped_column(ForeignKey("nodes.id"), nullable=False)
 
 
 class Certificate(Base):

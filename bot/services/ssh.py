@@ -50,6 +50,33 @@ systemctl reload nginx || systemctl restart nginx
 echo "NGINX_TLS_DONE"
 """
 
+# Генерация Cloudflare WARP-профиля на ноде через wgcf (один статический бинарь).
+# Печатает поля парсимо для бота; reserved вычисляется ботом из client_id (base64 → 3 байта).
+_WARP_SETUP_SCRIPT = """\
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+WGCF_VER="{wgcf_version}"
+mkdir -p /opt/xray/warp
+cd /opt/xray/warp
+
+if [ ! -x /usr/local/bin/wgcf ]; then
+    curl -fsSLo /usr/local/bin/wgcf "https://github.com/ViRb3/wgcf/releases/download/v${{WGCF_VER}}/wgcf_${{WGCF_VER}}_linux_amd64"
+    chmod +x /usr/local/bin/wgcf
+fi
+
+# Регистрируем аккаунт один раз (идемпотентно); затем генерим WG-профиль.
+[ -f wgcf-account.toml ] || (yes | wgcf register >/dev/null 2>&1)
+wgcf generate >/dev/null 2>&1
+
+PRIV=$(grep -i 'PrivateKey' wgcf-profile.conf | head -n1 | awk -F'= *' '{{print $2}}')
+ADDR=$(grep -i 'Address' wgcf-profile.conf | awk -F'= *' '{{print $2}}' | paste -sd, -)
+
+echo "WARP_PRIV=${{PRIV}}"
+echo "WARP_ADDR=${{ADDR}}"
+echo "WARP_DONE"
+"""
+
 _XRAY_SETUP_SCRIPT = """\
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -67,7 +94,7 @@ ufw --force enable
 
 mkdir -p /opt/xray/conf
 
-XRAY_VER=$(curl -fsSL https://api.github.com/repos/XTLS/Xray-core/releases/latest | jq -r '.tag_name')
+XRAY_VER="{xray_version}"
 curl -fsSLo /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${{XRAY_VER}}/Xray-linux-64.zip"
 unzip -o /tmp/xray.zip xray -d /opt/xray
 chmod +x /opt/xray/xray
@@ -157,13 +184,36 @@ class SSHClient:
             raise RuntimeError(f"Failed to parse x25519 output:\n{stdout}\n{stderr}")
         return private_key, public_key
 
-    async def setup_xray(self, api_port: int = 8080) -> str:
-        script = _XRAY_SETUP_SCRIPT.format(api_port=api_port)
+    async def setup_xray(self, api_port: int = 8080, xray_version: str = "v25.12.8") -> str:
+        script = _XRAY_SETUP_SCRIPT.format(api_port=api_port, xray_version=xray_version)
         stdout, stderr = await self.run_command(script)
         if "SETUP_DONE" not in stdout:
             raise RuntimeError(f"Xray setup failed:\n{stderr or stdout}")
         logger.info("Xray setup complete on %s", self._host)
         return stdout
+
+    async def setup_warp(self, wgcf_version: str = "2.2.22") -> dict[str, object]:
+        """Сгенерировать WARP-профиль на ноде через wgcf, вернуть параметры для Xray.
+
+        Возвращает {"secret_key": str, "address": list[str], "reserved": str}.
+        reserved дефолтит в "0,0,0" — рабочее значение, handshake проходит
+        (точный client_id wgcf не сохраняет в account.toml).
+        """
+        script = _WARP_SETUP_SCRIPT.format(wgcf_version=wgcf_version)
+        stdout, stderr = await self.run_command(script)
+        if "WARP_DONE" not in stdout:
+            raise RuntimeError(f"WARP setup failed:\n{stderr or stdout}")
+        secret_key = ""
+        address: list[str] = []
+        for line in stdout.splitlines():
+            if line.startswith("WARP_PRIV="):
+                secret_key = line.split("=", 1)[1].strip()
+            elif line.startswith("WARP_ADDR="):
+                address = [a.strip() for a in line.split("=", 1)[1].split(",") if a.strip()]
+        if not secret_key or not address:
+            raise RuntimeError(f"Failed to parse WARP profile:\n{stdout}")
+        logger.info("WARP profile generated on %s", self._host)
+        return {"secret_key": secret_key, "address": address, "reserved": "0,0,0"}
 
     async def deploy_xray_config(
         self,

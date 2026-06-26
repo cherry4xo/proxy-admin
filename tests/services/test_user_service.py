@@ -124,16 +124,18 @@ async def test_create_user_saves_user_and_redeploys(
     mocker,
 ):
     mock_session.execute.side_effect = [
-        _make_scalar_result(mocker, exit_node),   # exit lookup
+        _make_scalar_result(mocker, exit_node),   # exit lookup (валидация первичного exit)
         _make_scalar_result(mocker, ssh_key),     # ssh_key lookup
         _make_all_result(mocker, []),             # _add_user_to_running_nodes: bridges → нет
-        _make_scalar_result(mocker, active_user), # get_user_bridge_config: user lookup
-        _make_bridge_result(mocker, None),        # get_user_bridge_config: bridge lookup → нет bridge
     ]
     mock_session.add = mocker.Mock()
+    mock_session.flush = mocker.AsyncMock()
     mock_session.commit = mocker.AsyncMock()
     mock_session.refresh = mocker.AsyncMock()
     session_factory.return_value = mock_session
+    # M:N: хот-аддим на каждую ноду через _get_node_with_key; bridge-ссылки нет.
+    mocker.patch.object(service, "_get_node_with_key", mocker.AsyncMock(return_value=(exit_node, ssh_key)))
+    mocker.patch.object(service, "get_user_bridge_config", mocker.AsyncMock(side_effect=ValueError("no bridge")))
 
     user, vless_url, qr_bytes, bridge_url, bridge_qr = await service.create_user(
         name="alice", exit_node_id=10
@@ -144,6 +146,8 @@ async def test_create_user_saves_user_and_redeploys(
     mock_node_service.redeploy_exit_with_bridges.assert_not_called()
     assert "1.2.3.4" in vless_url
     assert len(qr_bytes) > 0
+    # subscription_token сгенерён при создании
+    assert user.subscription_token
     # bridge не привязан → bridge-ссылки нет
     assert bridge_url is None
     assert bridge_qr is None
@@ -207,15 +211,19 @@ async def test_deactivate_user_sets_inactive(
     mock_xray: XrayApiClient,
     mocker,
 ):
+    # get_user_nodes вызывается в отдельном async with — мокаем его напрямую
+    mocker.patch.object(service, "get_user_nodes", mocker.AsyncMock(return_value=[exit_node]))
+    
     mock_session.execute.side_effect = [
-        _make_scalar_result(mocker, active_user),
-        _make_scalar_result(mocker, exit_node),
-        _make_scalar_result(mocker, ssh_key),
-        _make_scalar_result(mocker, active_user),
+        _make_scalar_result(mocker, active_user),  # deactivate: user lookup
+        _make_scalar_result(mocker, exit_node),     # _get_node_with_key: node
+        _make_scalar_result(mocker, ssh_key),       # _get_node_with_key: ssh_key
+        _make_scalar_result(mocker, active_user),   # deactivate: final user update
     ]
     mock_session.commit = mocker.AsyncMock()
     mock_session.delete = mocker.AsyncMock()
     session_factory.return_value = mock_session
+    mock_session.__aenter__.return_value = mock_session
 
     await service.deactivate_user(user_id=1, delete_from_db=False)
 
@@ -235,19 +243,34 @@ async def test_deactivate_user_deletes_from_db(
     mock_xray: XrayApiClient,
     mocker,
 ):
+    # get_user_nodes вызывается в отдельном async with — мокаем его напрямую
+    mocker.patch.object(service, "get_user_nodes", mocker.AsyncMock(return_value=[exit_node]))
+    
+    # UserNode rows for deletion
+    user_node = mocker.Mock()
+    un_scalars_mock = mocker.Mock()
+    un_scalars_mock.all.return_value = [user_node]
+    user_nodes_result = mocker.Mock()
+    user_nodes_result.scalars.return_value = un_scalars_mock
+    
     mock_session.execute.side_effect = [
-        _make_scalar_result(mocker, active_user),
-        _make_scalar_result(mocker, exit_node),
-        _make_scalar_result(mocker, ssh_key),
-        _make_scalar_result(mocker, active_user),
+        _make_scalar_result(mocker, active_user),  # deactivate: user lookup
+        _make_scalar_result(mocker, exit_node),     # _get_node_with_key: node
+        _make_scalar_result(mocker, ssh_key),       # _get_node_with_key: ssh_key
+        _make_scalar_result(mocker, active_user),   # deactivate: user for delete
+        user_nodes_result,                          # delete: UserNode rows (scalars().all())
     ]
     mock_session.commit = mocker.AsyncMock()
     mock_session.delete = mocker.AsyncMock()
     session_factory.return_value = mock_session
+    mock_session.__aenter__.return_value = mock_session
 
     await service.deactivate_user(user_id=1, delete_from_db=True)
 
-    mock_session.delete.assert_called_once_with(active_user)
+    # delete вызывается дважды: сначала для UserNode, потом для User
+    assert mock_session.delete.call_count == 2
+    # Второй вызов — удаление пользователя
+    assert mock_session.delete.call_args_list[1].args[0] == active_user
 
 
 @pytest.mark.asyncio
@@ -284,9 +307,81 @@ def test_build_vless_url_contains_expected_parts(service: UserService, remark: s
     assert "vless://uuid-1@1.2.3.4:443" in url
     assert expected_fragment in url
     assert "security=reality" in url
+    # fingerprint из config (мок conftest = chrome) + spiderX для мимикрии handshake
+    assert "fp=chrome" in url
+    assert "spx=%2F" in url
 
 
 def test_generate_qr_code_returns_png_bytes(service: UserService):
     result = service._generate_qr_code("vless://test@1.2.3.4:443?security=reality")
 
     assert result[:4] == b"\x89PNG"
+
+
+def test_subscription_url_format(service: UserService):
+    # SUB_URL_BASE мокнут в conftest = https://sub.example.com
+    assert service._subscription_url("tok123") == "https://sub.example.com/sub/tok123"
+
+
+@pytest.mark.asyncio
+async def test_get_subscription_payload_unknown_token_returns_none(
+    service: UserService, session_factory, mock_session, mocker
+):
+    mock_session.execute.return_value = _make_scalar_result(mocker, None)
+    session_factory.return_value = mock_session
+
+    assert await service.get_subscription_payload("nope") is None
+
+
+@pytest.mark.asyncio
+async def test_get_subscription_payload_inactive_user_returns_none(
+    service: UserService, session_factory, mock_session, active_user: User, mocker
+):
+    active_user.is_active = False
+    active_user.subscription_token = "tok"
+    mock_session.execute.return_value = _make_scalar_result(mocker, active_user)
+    session_factory.return_value = mock_session
+
+    assert await service.get_subscription_payload("tok") is None
+
+
+@pytest.mark.asyncio
+async def test_get_subscription_payload_returns_base64_and_headers(
+    service: UserService, session_factory, mock_session, active_user: User, mocker
+):
+    import base64
+
+    active_user.is_active = True
+    active_user.subscription_token = "tok"
+    mock_session.execute.return_value = _make_scalar_result(mocker, active_user)
+    session_factory.return_value = mock_session
+    # сборку ссылок мокаем — проверяем обёртку payload
+    mocker.patch.object(
+        service,
+        "build_user_links",
+        mocker.AsyncMock(return_value=[("a", "vless://1"), ("b", "vless://2")]),
+    )
+
+    body_b64, headers = await service.get_subscription_payload("tok")
+
+    decoded = base64.b64decode(body_b64).decode()
+    assert decoded == "vless://1\nvless://2"
+    assert "Profile-Title" in headers
+    assert headers["Profile-Update-Interval"] == "12"
+    assert "Subscription-Userinfo" in headers
+
+
+@pytest.mark.asyncio
+async def test_rotate_subscription_changes_token(
+    service: UserService, session_factory, mock_session, active_user: User, mocker
+):
+    active_user.subscription_token = "old-token"
+    mock_session.execute.return_value = _make_scalar_result(mocker, active_user)
+    mock_session.commit = mocker.AsyncMock()
+    mock_session.refresh = mocker.AsyncMock()
+    session_factory.return_value = mock_session
+
+    url = await service.rotate_subscription(active_user.id)
+
+    assert active_user.subscription_token != "old-token"
+    assert url.startswith("https://sub.example.com/sub/")

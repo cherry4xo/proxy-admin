@@ -3,7 +3,8 @@ import logging
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, Message
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.deps import Deps
 from bot.keyboards.main_menu import back_keyboard
@@ -15,6 +16,7 @@ router = Router()
 class CreateUserFSM(StatesGroup):
     name = State()
     exit_node_id = State()
+    extra_nodes = State()
 
 
 class UserActionFSM(StatesGroup):
@@ -27,6 +29,26 @@ class GetConfigFSM(StatesGroup):
 
 class GetBridgeConfigFSM(StatesGroup):
     user_id = State()
+
+
+class SubscriptionFSM(StatesGroup):
+    user_id = State()
+
+
+class RotateSubFSM(StatesGroup):
+    user_id = State()
+
+
+async def _extra_nodes_keyboard(deps: Deps, primary_id: int, selected: set[int]):
+    """Клавиатура мульти-выбора доп. exit-нод (галочки) + Готово."""
+    nodes = [n for n in await deps.node_service.list_nodes() if n.role == "exit" and n.id != primary_id]
+    builder = InlineKeyboardBuilder()
+    for n in nodes:
+        mark = "☑️" if n.id in selected else "⬜"
+        builder.row(InlineKeyboardButton(text=f"{mark} [{n.id}] {n.name}", callback_data=f"usernode:{n.id}"))
+    builder.row(InlineKeyboardButton(text="✅ Готово (создать)", callback_data="usernode:done"))
+    builder.row(InlineKeyboardButton(text="« Главное меню", callback_data="menu:main"))
+    return builder.as_markup()
 
 
 @router.callback_query(F.data == "user:list")
@@ -65,8 +87,9 @@ async def cb_user_create_start(callback: CallbackQuery, state: FSMContext) -> No
 
 @router.message(CreateUserFSM.name)
 async def fsm_user_name(message: Message, state: FSMContext) -> None:
-    await state.update_data(name=message.text)
-    await message.answer("Введите ID Exit Node (из БД) для этого пользователя:", reply_markup=back_keyboard())
+    telegram_id = message.from_user.id if message.from_user else None
+    await state.update_data(name=message.text, telegram_id=telegram_id)
+    await message.answer("Введите ID первичной Exit Node (из БД) для этого пользователя:", reply_markup=back_keyboard())
     await state.set_state(CreateUserFSM.exit_node_id)
 
 
@@ -78,24 +101,69 @@ async def fsm_user_exit_node(message: Message, state: FSMContext, deps: Deps) ->
         await message.answer("Введите числовой ID:")
         return
 
+    await state.update_data(exit_node_id=exit_node_id, extra=[])
+    await message.answer(
+        "Выберите дополнительные Exit-ноды для подписки (необязательно).\n"
+        "Подписка соберёт ссылки по всем выбранным нодам. Нажмите «Готово», когда закончите.",
+        reply_markup=await _extra_nodes_keyboard(deps, exit_node_id, set()),
+    )
+    await state.set_state(CreateUserFSM.extra_nodes)
+
+
+@router.callback_query(CreateUserFSM.extra_nodes, F.data.startswith("usernode:"))
+async def cb_user_extra_node(callback: CallbackQuery, state: FSMContext, deps: Deps) -> None:
+    arg = (callback.data or "").split(":", 1)[1]
+    data = await state.get_data()
+    primary_id = data["exit_node_id"]
+    selected = set(data.get("extra", []))
+
+    if arg == "done":
+        await callback.answer()
+        await _finalize_user_creation(callback.message, state, deps)  # type: ignore[arg-type]
+        return
+
+    node_id = int(arg)
+    if node_id in selected:
+        selected.discard(node_id)
+    else:
+        selected.add(node_id)
+    await state.update_data(extra=list(selected))
+    await callback.message.edit_reply_markup(  # type: ignore[union-attr]
+        reply_markup=await _extra_nodes_keyboard(deps, primary_id, selected)
+    )
+    await callback.answer()
+
+
+async def _finalize_user_creation(message: Message, state: FSMContext, deps: Deps) -> None:
     data = await state.get_data()
     name = data["name"]
+    exit_node_id = data["exit_node_id"]
+    extra = data.get("extra", [])
+    telegram_id = data.get("telegram_id")
     await state.clear()
 
     await message.answer(f"Создаю пользователя <b>{name}</b>...", parse_mode="HTML")
 
     try:
-        telegram_id = message.from_user.id if message.from_user else None
         user, vless_url, qr_bytes, bridge_url, bridge_qr = await deps.user_service.create_user(
             name=name,
             exit_node_id=exit_node_id,
             telegram_id=telegram_id,
+            extra_exit_ids=extra,
         )
+        sub_url = await deps.user_service.ensure_subscription(user.id)
         await message.answer(
             f"Пользователь <b>{user.name}</b> создан!\n\n"
-            f"UUID: <code>{user.uuid}</code>\n\n"
+            f"UUID: <code>{user.uuid}</code>\n"
+            f"Exit-ноды: {', '.join(str(i) for i in [exit_node_id, *extra])}\n\n"
+            f"🔗 Subscription (рекомендуется):\n<code>{sub_url}</code>\n\n"
             f"🔗 Прямая (Exit):\n<code>{vless_url}</code>",
             parse_mode="HTML",
+        )
+        sub_qr = deps.user_service._generate_qr_code(sub_url)
+        await message.answer_photo(
+            photo=BufferedInputFile(sub_qr, filename="qrcode-sub.png"),
+            caption=f"QR подписки для {user.name}",
         )
         await message.answer_photo(
             photo=BufferedInputFile(qr_bytes, filename="qrcode-exit.png"),
@@ -227,4 +295,76 @@ async def fsm_get_bridge_config_user_id(message: Message, state: FSMContext, dep
         )
     except Exception as e:
         logger.exception("Failed to get bridge config for user %d", user_id)
+        await message.answer(f"Ошибка:\n<code>{e}</code>", reply_markup=back_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "user:subscription")
+async def cb_subscription_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID пользователя (subscription-ссылка):",
+        reply_markup=back_keyboard(),
+    )
+    await state.set_state(SubscriptionFSM.user_id)
+    await callback.answer()
+
+
+@router.message(SubscriptionFSM.user_id)
+async def fsm_subscription_user_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    try:
+        user_id = int(message.text or "")
+    except ValueError:
+        await message.answer("Введите числовой ID:")
+        return
+    await state.clear()
+    try:
+        sub_url = await deps.user_service.ensure_subscription(user_id)
+        qr = deps.user_service._generate_qr_code(sub_url)
+        await message.answer(
+            f"🔗 Subscription пользователя #{user_id}:\n\n<code>{sub_url}</code>\n\n"
+            "Импортируй в v2RayTun / Hiddify / Happ — клиент подтянет все ноды и будет авто-обновляться.",
+            parse_mode="HTML",
+        )
+        await message.answer_photo(
+            photo=BufferedInputFile(qr, filename="qrcode-sub.png"),
+            caption=f"QR подписки #{user_id}",
+            reply_markup=back_keyboard(),
+        )
+    except Exception as e:
+        logger.exception("Failed to get subscription for user %d", user_id)
+        await message.answer(f"Ошибка:\n<code>{e}</code>", reply_markup=back_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "user:rotate_sub")
+async def cb_rotate_sub_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID пользователя для перевыпуска подписки (старый URL перестанет работать):",
+        reply_markup=back_keyboard(),
+    )
+    await state.set_state(RotateSubFSM.user_id)
+    await callback.answer()
+
+
+@router.message(RotateSubFSM.user_id)
+async def fsm_rotate_sub_user_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    try:
+        user_id = int(message.text or "")
+    except ValueError:
+        await message.answer("Введите числовой ID:")
+        return
+    await state.clear()
+    try:
+        sub_url = await deps.user_service.rotate_subscription(user_id)
+        qr = deps.user_service._generate_qr_code(sub_url)
+        await message.answer(
+            f"♻️ Подписка #{user_id} перевыпущена. Старый URL больше не работает.\n\n"
+            f"<code>{sub_url}</code>",
+            parse_mode="HTML",
+        )
+        await message.answer_photo(
+            photo=BufferedInputFile(qr, filename="qrcode-sub.png"),
+            caption=f"Новый QR подписки #{user_id}",
+            reply_markup=back_keyboard(),
+        )
+    except Exception as e:
+        logger.exception("Failed to rotate subscription for user %d", user_id)
         await message.answer(f"Ошибка:\n<code>{e}</code>", reply_markup=back_keyboard(), parse_mode="HTML")

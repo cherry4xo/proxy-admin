@@ -23,6 +23,11 @@ def generate_uuid() -> str:
     return str(uuid.uuid4())
 
 
+def generate_subscription_token() -> str:
+    """URL-safe секретный токен для subscription-ссылки (~256 бит)."""
+    return secrets.token_urlsafe(32)
+
+
 def generate_x25519_keypair() -> tuple[str, str]:
     private_key = X25519PrivateKey.generate()
     private_bytes = private_key.private_bytes(

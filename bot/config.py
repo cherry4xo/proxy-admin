@@ -30,13 +30,29 @@ class Settings(BaseSettings):
     HTTPX_VERIFY: bool = True
 
     # Xray defaults
-    REALITY_SNI: str = "www.microsoft.com"
+    # Пин версии Xray-core (детерминированный деплой + гарантия свежей мимикрии
+    # NewSessionTicket/uTLS). Менять осознанно, сверяясь с релизами XTLS/Xray-core.
+    XRAY_VERSION: str = "v25.12.8"
+    # Версия wgcf для генерации WARP-профиля на нодах.
+    WGCF_VERSION: str = "2.2.22"
+    # Дефолтный REALITY-донор (dest/SNI). Критерии XTLS: TLS1.3+H2, не редирект,
+    # IP не в РФ, post-ServerHello шифруется единым блоком (dl.google.com — эталон).
+    REALITY_SNI: str = "dl.google.com"
+    # uTLS fingerprint для REALITY (chrome|firefox|safari|ios|android|edge|random|randomized).
+    # chrome — рекомендация 2026; uTLS в пиновой XRAY_VERSION обновлён под свежий Chrome.
+    FINGERPRINT: str = "chrome"
     # HTTP Host заголовок для XHTTP транспорта — должен быть твой домен или IP ноды
     # Если пустой — используется IP ноды автоматически
     XHTTP_HOST: str = ""
     XRAY_API_PORT: int = 8080
     # "docker" или "systemd" — способ запуска Xray на нодах
     XRAY_RUNTIME: str = "systemd"
+
+    # Subscription HTTP-сервер (отдельный docker-контейнер: python -m bot.web.subscription)
+    SUB_HTTP_HOST: str = "0.0.0.0"     # внутри контейнера слушаем все интерфейсы
+    SUB_HTTP_PORT: int = 8008          # наружу маппится как 127.0.0.1:8008 (через nginx/поддомен)
+    SUB_URL_BASE: str = ""             # публичный базовый URL, напр. "https://sub.cherry4xo.ru"
+    SUB_UPDATE_INTERVAL_H: int = 12    # Profile-Update-Interval (часы) для клиента
 
     @field_validator("ADMIN_IDS", mode="before")
     @classmethod
