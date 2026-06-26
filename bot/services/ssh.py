@@ -171,6 +171,17 @@ class SSHClient:
         return stdout
 
     async def generate_x25519(self) -> tuple[str, str]:
+        """Генерирует пару X25519 через бинарь Xray.
+
+        Формат вывода (Xray v25+):
+          PrivateKey: <base64>
+          Password: <base64>      # это публичный ключ (новое имя в v25+)
+          Hash32: <base64>
+
+        Старый формат (v24-):
+          PrivateKey: <base64>
+          PublicKey: <base64>
+        """
         stdout, stderr = await self.run_command("/opt/xray/xray x25519")
         private_key = ""
         public_key = ""
@@ -178,7 +189,8 @@ class SSHClient:
             lower = line.lower()
             if "privatekey:" in lower or "private key:" in lower:
                 private_key = line.split(":", 1)[1].strip()
-            elif "publickey:" in lower or "public key:" in lower or "password (publickey):" in lower:
+            elif "password:" in lower or "publickey:" in lower or "public key:" in lower:
+                # Password — это публичный ключ в новом формате Xray v25+
                 public_key = line.split(":", 1)[1].strip()
         if not private_key or not public_key:
             raise RuntimeError(f"Failed to parse x25519 output:\n{stdout}\n{stderr}")
