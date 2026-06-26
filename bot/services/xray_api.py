@@ -14,16 +14,15 @@ class XrayApiClient:
 
     async def add_user(self, inbound_tag: str, user_uuid: str, flow: str = "") -> None:
         # Горячее добавление клиента в работающий Xray без рестарта процесса.
-        users_json = (
-            '[{"user":{"vless":{"id":"%s","flow":"%s"}},"email":"%s"}]'
-            % (user_uuid, flow, user_uuid)
-        )
+        # Xray v25+: используем новый формат API (один пользователь за вызов)
         cmd = (
             f"xray api adduser "
             f"--server=127.0.0.1:{self._api_port} "
-            f"-tag={inbound_tag} "
-            f"-users='{users_json}'"
+            f"--inbound={inbound_tag} "
+            f"--user={user_uuid}"
         )
+        if flow:
+            cmd += f" --flow={flow}"
         stdout, stderr = await self._ssh.run_command(cmd)
         combined = (stdout + stderr).lower()
         if "error" in combined or "failed" in combined:
@@ -31,11 +30,12 @@ class XrayApiClient:
         logger.info("add_user on %s: %s %s", self._host, stdout.strip(), stderr.strip())
 
     async def remove_user(self, inbound_tag: str, user_uuid: str) -> None:
+        # Xray v25+: новый формат API
         cmd = (
             f"xray api removeuser "
             f"--server=127.0.0.1:{self._api_port} "
-            f"-tag={inbound_tag} "
-            f"-email={user_uuid}"
+            f"--inbound={inbound_tag} "
+            f"--user={user_uuid}"
         )
         stdout, stderr = await self._ssh.run_command(cmd)
         logger.info("remove_user on %s: %s %s", self._host, stdout.strip(), stderr.strip())
