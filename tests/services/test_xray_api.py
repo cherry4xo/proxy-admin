@@ -22,9 +22,8 @@ async def test_add_user_builds_adduser_command(xray: XrayApiClient, mock_ssh):
     cmd = mock_ssh.run_command.call_args.args[0]
     assert "xray api adduser" in cmd
     assert "--server=127.0.0.1:8080" in cmd
-    assert "-tag=inbound-vless" in cmd
-    assert '"id":"uuid-1"' in cmd
-    assert '"flow":""' in cmd
+    assert "--inbound=inbound-vless" in cmd
+    assert "--user=uuid-1" in cmd
 
 
 @pytest.mark.asyncio
@@ -41,5 +40,6 @@ async def test_remove_user_builds_removeuser_command(xray: XrayApiClient, mock_s
 
     cmd = mock_ssh.run_command.call_args.args[0]
     assert "xray api removeuser" in cmd
-    assert "-tag=inbound-vless" in cmd
-    assert "-email=uuid-1" in cmd
+    assert "--server=127.0.0.1:8080" in cmd
+    assert "--inbound=inbound-vless" in cmd
+    assert "--user=uuid-1" in cmd
