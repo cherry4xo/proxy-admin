@@ -109,6 +109,9 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🔗 Subscription-ссылка", callback_data="user:subscription"),
         InlineKeyboardButton(text="♻️ Перевыпустить подписку", callback_data="user:rotate_sub"),
     )
+    builder.row(
+        InlineKeyboardButton(text="📦 Узлы в подписке", callback_data="user:subscription_nodes"),
+    )
 
     return builder.as_markup()
 

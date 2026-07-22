@@ -39,6 +39,13 @@ class RotateSubFSM(StatesGroup):
     user_id = State()
 
 
+class SubscriptionNodesFSM(StatesGroup):
+    user_id = State()
+    add_node_id = State()
+    remove_node_id = State()
+    primary_node_id = State()
+
+
 async def _extra_nodes_keyboard(deps: Deps, primary_id: int, selected: set[int]):
     """Клавиатура мульти-выбора доп. exit-нод (галочки) + Готово."""
     nodes = [n for n in await deps.node_service.list_nodes() if n.role == "exit" and n.id != primary_id]
@@ -368,3 +375,258 @@ async def fsm_rotate_sub_user_id(message: Message, state: FSMContext, deps: Deps
     except Exception as e:
         logger.exception("Failed to rotate subscription for user %d", user_id)
         await message.answer(f"Ошибка:\n<code>{e}</code>", reply_markup=back_keyboard(), parse_mode="HTML")
+
+
+# ==================== Subscription Node Management ====================
+
+@router.callback_query(F.data == "user:subscription_nodes")
+async def cb_sub_nodes_start(callback: CallbackQuery, state: FSMContext) -> None:
+    """Start managing subscription nodes for a user."""
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID пользователя для управления узлами в подписке:",
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(SubscriptionNodesFSM.user_id)
+    await callback.answer()
+
+
+@router.message(SubscriptionNodesFSM.user_id)
+async def fsm_sub_nodes_user_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    try:
+        user_id = int(message.text or "")
+    except ValueError:
+        await message.answer("Введите числовой ID:")
+        return
+
+    # Get user and their subscription nodes
+    async with deps.session_factory() as session:
+        from bot.database.models import User
+        from sqlalchemy import select
+        user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+
+    if not user:
+        await message.answer(f"Пользователь {user_id} не найден.", reply_markup=back_keyboard())
+        await state.clear()
+        return
+
+    # Get user's subscription nodes
+    nodes = await deps.user_service.get_subscription_nodes(user_id)
+
+    # Build menu
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text="➕ Добавить узел", callback_data=f"subnode:add:{user_id}"))
+    if len(nodes) > 1:
+        builder.row(InlineKeyboardButton(text="➖ Удалить узел", callback_data=f"subnode:remove:{user_id}"))
+        builder.row(InlineKeyboardButton(text="🎯 Сменить основной", callback_data=f"subnode:primary:{user_id}"))
+    builder.row(InlineKeyboardButton(text="« Назад", callback_data="menu:main"))
+
+    node_list = "\n".join([
+        f"  {'🎯' if n.id == user.exit_node_id else '  '} [{n.id}] {n.name} ({n.ip or 'no IP'})"
+        for n in nodes
+    ]) or "  Нет узлов"
+
+    await message.answer(
+        f"<b>Подписка пользователя #{user_id} ({user.name})</b>\n\n"
+        f"Узлы в подписке ({len(nodes)}):\n{node_list}\n\n"
+        f"Основной узел: #{user.exit_node_id}",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+    await state.clear()
+
+
+@router.callback_query(F.data.startswith("subnode:add:"))
+async def cb_subnode_add(callback: CallbackQuery, deps: Deps) -> None:
+    """Add node to subscription."""
+    user_id = int(callback.data.split(":")[2])
+
+    # Get available exit nodes (not in subscription yet)
+    async with deps.session_factory() as session:
+        from bot.database.models import User, UserNode, Node
+        from sqlalchemy import select
+
+        user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        if not user:
+            await callback.answer("Пользователь не найден", show_alert=True)
+            return
+
+        # Get nodes already in subscription
+        sub_nodes = (await session.execute(
+            select(UserNode.exit_node_id).where(UserNode.user_id == user_id)
+        )).scalars().all()
+
+        # Get available exit nodes
+        available_nodes = (await session.execute(
+            select(Node).where(Node.role == "exit", Node.id.notin_(sub_nodes))
+        )).scalars().all()
+
+    if not available_nodes:
+        await callback.answer("Нет доступных узлов для добавления", show_alert=True)
+        return
+
+    builder = InlineKeyboardBuilder()
+    for n in available_nodes:
+        builder.row(InlineKeyboardButton(
+            text=f"[{n.id}] {n.name}",
+            callback_data=f"subnode:add_confirm:{user_id}:{n.id}"
+        ))
+    builder.row(InlineKeyboardButton(text="« Назад", callback_data="user:subscription_nodes"))
+
+    await callback.message.edit_text(
+        f"Выберите узел для добавления к подписке #{user_id} ({user.name}):",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("subnode:add_confirm:"))
+async def cb_subnode_add_confirm(callback: CallbackQuery, deps: Deps) -> None:
+    """Confirm adding node to subscription."""
+    parts = callback.data.split(":")
+    user_id = int(parts[2])
+    node_id = int(parts[3])
+
+    result = await deps.user_service.add_node_to_subscription(user_id, node_id)
+
+    if result["success"]:
+        await callback.message.edit_text(
+            f"✅ Узел <b>{result['node_name']}</b> добавлен в подписку пользователя #{user_id}",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    else:
+        await callback.message.edit_text(
+            f"❌ Ошибка: {result['error']}",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("subnode:remove:"))
+async def cb_subnode_remove(callback: CallbackQuery, deps: Deps) -> None:
+    """Remove node from subscription."""
+    user_id = int(callback.data.split(":")[2])
+
+    # Get user's subscription nodes (excluding primary)
+    async with deps.session_factory() as session:
+        from bot.database.models import User, UserNode, Node
+        from sqlalchemy import select
+
+        user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        if not user:
+            await callback.answer("Пользователь не найден", show_alert=True)
+            return
+
+        # Get nodes in subscription (excluding primary)
+        sub_nodes = (await session.execute(
+            select(Node)
+            .join(UserNode, UserNode.exit_node_id == Node.id)
+            .where(UserNode.user_id == user_id, Node.id != user.exit_node_id)
+        )).scalars().all()
+
+    if not sub_nodes:
+        await callback.answer("Нет узлов для удаления (кроме основного)", show_alert=True)
+        return
+
+    builder = InlineKeyboardBuilder()
+    for n in sub_nodes:
+        builder.row(InlineKeyboardButton(
+            text=f"[{n.id}] {n.name}",
+            callback_data=f"subnode:remove_confirm:{user_id}:{n.id}"
+        ))
+    builder.row(InlineKeyboardButton(text="« Назад", callback_data="user:subscription_nodes"))
+
+    await callback.message.edit_text(
+        f"Выберите узел для удаления из подписки #{user_id} ({user.name}):\n"
+        f"(Основной узел #{user.exit_node_id} нельзя удалить)",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("subnode:remove_confirm:"))
+async def cb_subnode_remove_confirm(callback: CallbackQuery, deps: Deps) -> None:
+    """Confirm removing node from subscription."""
+    parts = callback.data.split(":")
+    user_id = int(parts[2])
+    node_id = int(parts[3])
+
+    result = await deps.user_service.remove_node_from_subscription(user_id, node_id)
+
+    if result["success"]:
+        await callback.message.edit_text(
+            f"✅ Узел <b>{result['node_name']}</b> удалён из подписки пользователя #{user_id}",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    else:
+        await callback.message.edit_text(
+            f"❌ Ошибка: {result['error']}",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("subnode:primary:"))
+async def cb_subnode_primary(callback: CallbackQuery, deps: Deps) -> None:
+    """Change primary exit node."""
+    user_id = int(callback.data.split(":")[2])
+
+    # Get user's subscription nodes
+    nodes = await deps.user_service.get_subscription_nodes(user_id)
+
+    if len(nodes) <= 1:
+        await callback.answer("Нельзя сменить основной узел — в подписке только один узел", show_alert=True)
+        return
+
+    async with deps.session_factory() as session:
+        from bot.database.models import User
+        from sqlalchemy import select
+        user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+        current_primary = user.exit_node_id if user else None
+
+    builder = InlineKeyboardBuilder()
+    for n in nodes:
+        mark = "🎯 " if n.id == current_primary else ""
+        builder.row(InlineKeyboardButton(
+            text=f"{mark}[{n.id}] {n.name}",
+            callback_data=f"subnode:primary_confirm:{user_id}:{n.id}"
+        ))
+    builder.row(InlineKeyboardButton(text="« Назад", callback_data="user:subscription_nodes"))
+
+    await callback.message.edit_text(
+        f"Выберите основной узел для подписки #{user_id} ({user.name if user else 'unknown'}):\n"
+        f"Текущий основной: #{current_primary}",
+        reply_markup=builder.as_markup(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("subnode:primary_confirm:"))
+async def cb_subnode_primary_confirm(callback: CallbackQuery, deps: Deps) -> None:
+    """Confirm changing primary exit node."""
+    parts = callback.data.split(":")
+    user_id = int(parts[2])
+    node_id = int(parts[3])
+
+    result = await deps.user_service.set_primary_exit_node(user_id, node_id)
+
+    if result["success"]:
+        await callback.message.edit_text(
+            f"✅ Основной узел изменён на <b>{result['node_name']}</b> для пользователя #{user_id}",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    else:
+        await callback.message.edit_text(
+            f"❌ Ошибка: {result['error']}",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    await callback.answer()

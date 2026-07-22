@@ -17,6 +17,7 @@ class Deps:
     node_service: NodeService
     user_service: UserService
     sni_rotation_service: SNIRotationService
+    session_factory: type[async_session_factory]
     bitlaunch: BitLaunchClient
     yandex: YandexClient
     nlb: YandexNLBClient
@@ -60,6 +61,7 @@ def build_deps() -> Deps:
         node_service=node_service,
         user_service=user_service,
         sni_rotation_service=sni_rotation_service,
+        session_factory=async_session_factory,
         bitlaunch=bitlaunch,
         yandex=yandex,
         nlb=nlb,

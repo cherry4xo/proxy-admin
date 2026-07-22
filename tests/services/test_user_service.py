@@ -5,7 +5,6 @@ import pytest
 
 from bot.database.models import Node, SSHKey, User
 from bot.services.user_service import UserService
-from bot.services.xray_api import XrayApiClient
 
 
 @pytest.fixture()
@@ -65,14 +64,6 @@ def active_user(exit_node: Node) -> User:
 
 
 @pytest.fixture()
-def mock_xray(mocker) -> XrayApiClient:
-    xray = mocker.Mock(spec=XrayApiClient)
-    xray.add_user = mocker.AsyncMock()
-    xray.remove_user = mocker.AsyncMock()
-    return xray
-
-
-@pytest.fixture()
 def mock_node_service(mocker):
     from bot.services.node_service import NodeService
     svc = mocker.Mock(spec=NodeService)
@@ -82,9 +73,8 @@ def mock_node_service(mocker):
 
 
 @pytest.fixture()
-def service(session_factory, mocker, mock_xray: XrayApiClient, mock_node_service) -> UserService:
+def service(session_factory, mocker, mock_node_service) -> UserService:
     svc = UserService(session_factory=session_factory, node_service=mock_node_service)
-    mocker.patch.object(svc, "_make_xray_client", return_value=mock_xray)
     return svc
 
 
@@ -119,21 +109,21 @@ async def test_create_user_saves_user_and_redeploys(
     exit_node: Node,
     ssh_key: SSHKey,
     active_user: User,
-    mock_xray: XrayApiClient,
     mock_node_service,
     mocker,
 ):
+    """Test create_user uses redeploy (not add_user API) for Xray v25+."""
     mock_session.execute.side_effect = [
         _make_scalar_result(mocker, exit_node),   # exit lookup (валидация первичного exit)
         _make_scalar_result(mocker, ssh_key),     # ssh_key lookup
-        _make_all_result(mocker, []),             # _add_user_to_running_nodes: bridges → нет
     ]
     mock_session.add = mocker.Mock()
     mock_session.flush = mocker.AsyncMock()
     mock_session.commit = mocker.AsyncMock()
     mock_session.refresh = mocker.AsyncMock()
     session_factory.return_value = mock_session
-    # M:N: хот-аддим на каждую ноду через _get_node_with_key; bridge-ссылки нет.
+    
+    # M:N: хот-аддим через redeploy
     mocker.patch.object(service, "_get_node_with_key", mocker.AsyncMock(return_value=(exit_node, ssh_key)))
     mocker.patch.object(service, "get_user_bridge_config", mocker.AsyncMock(side_effect=ValueError("no bridge")))
 
@@ -141,9 +131,8 @@ async def test_create_user_saves_user_and_redeploys(
         name="alice", exit_node_id=10
     )
 
-    # Горячий путь: adduser на exit, без полного redeploy.
-    mock_xray.add_user.assert_any_call("inbound-vless", user.uuid, flow="")
-    mock_node_service.redeploy_exit_with_bridges.assert_not_called()
+    # Xray v25+: используем redeploy вместо add_user API
+    mock_node_service.redeploy_exit_with_bridges.assert_called_once_with(10)
     assert "1.2.3.4" in vless_url
     assert len(qr_bytes) > 0
     # subscription_token сгенерён при создании
@@ -208,16 +197,15 @@ async def test_deactivate_user_sets_inactive(
     active_user: User,
     exit_node: Node,
     ssh_key: SSHKey,
-    mock_xray: XrayApiClient,
+    mock_node_service,
     mocker,
 ):
+    """Test deactivate_user uses redeploy (not remove_user API) for Xray v25+."""
     # get_user_nodes вызывается в отдельном async with — мокаем его напрямую
     mocker.patch.object(service, "get_user_nodes", mocker.AsyncMock(return_value=[exit_node]))
-    
+
     mock_session.execute.side_effect = [
         _make_scalar_result(mocker, active_user),  # deactivate: user lookup
-        _make_scalar_result(mocker, exit_node),     # _get_node_with_key: node
-        _make_scalar_result(mocker, ssh_key),       # _get_node_with_key: ssh_key
         _make_scalar_result(mocker, active_user),   # deactivate: final user update
     ]
     mock_session.commit = mocker.AsyncMock()
@@ -227,7 +215,8 @@ async def test_deactivate_user_sets_inactive(
 
     await service.deactivate_user(user_id=1, delete_from_db=False)
 
-    mock_xray.remove_user.assert_called_once_with("inbound-vless", active_user.uuid)
+    # Xray v25+: используем redeploy вместо remove_user API
+    mock_node_service.redeploy_exit_with_bridges.assert_called_once_with(10)
     assert active_user.is_active is False
     mock_session.delete.assert_not_called()
 
@@ -240,23 +229,22 @@ async def test_deactivate_user_deletes_from_db(
     active_user: User,
     exit_node: Node,
     ssh_key: SSHKey,
-    mock_xray: XrayApiClient,
+    mock_node_service,
     mocker,
 ):
+    """Test deactivate_user with delete_from_db=True uses redeploy and deletes from DB."""
     # get_user_nodes вызывается в отдельном async with — мокаем его напрямую
     mocker.patch.object(service, "get_user_nodes", mocker.AsyncMock(return_value=[exit_node]))
-    
+
     # UserNode rows for deletion
     user_node = mocker.Mock()
     un_scalars_mock = mocker.Mock()
     un_scalars_mock.all.return_value = [user_node]
     user_nodes_result = mocker.Mock()
     user_nodes_result.scalars.return_value = un_scalars_mock
-    
+
     mock_session.execute.side_effect = [
         _make_scalar_result(mocker, active_user),  # deactivate: user lookup
-        _make_scalar_result(mocker, exit_node),     # _get_node_with_key: node
-        _make_scalar_result(mocker, ssh_key),       # _get_node_with_key: ssh_key
         _make_scalar_result(mocker, active_user),   # deactivate: user for delete
         user_nodes_result,                          # delete: UserNode rows (scalars().all())
     ]
@@ -267,6 +255,8 @@ async def test_deactivate_user_deletes_from_db(
 
     await service.deactivate_user(user_id=1, delete_from_db=True)
 
+    # Xray v25+: используем redeploy вместо remove_user API
+    mock_node_service.redeploy_exit_with_bridges.assert_called_once_with(10)
     # delete вызывается дважды: сначала для UserNode, потом для User
     assert mock_session.delete.call_count == 2
     # Второй вызов — удаление пользователя

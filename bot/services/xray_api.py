@@ -7,35 +7,20 @@ logger = logging.getLogger(__name__)
 
 
 class XrayApiClient:
+    """Xray API client.
+    
+    NOTE: Xray v25+ НЕ поддерживает команды adduser/removeuser через CLI.
+    Для управления пользователями используйте redeploy_node (через NodeService).
+    Этот класс используется только для статистики и мониторинга.
+    """
+    
     def __init__(self, host: str, api_port: int, ssh_client: SSHClient) -> None:
         self._host = host
         self._api_port = api_port
         self._ssh = ssh_client
 
-    async def add_user(self, inbound_tag: str, user_uuid: str, flow: str = "") -> None:
-        # Горячее добавление клиента в работающий Xray без рестарта процесса.
-        # Xray v25+: используем новый формат API (один пользователь за вызов)
-        cmd = (
-            f"xray api adduser "
-            f"--server=127.0.0.1:{self._api_port} "
-            f"--inbound={inbound_tag} "
-            f"--user={user_uuid}"
-        )
-        if flow:
-            cmd += f" --flow={flow}"
-        stdout, stderr = await self._ssh.run_command(cmd)
-        combined = (stdout + stderr).lower()
-        if "error" in combined or "failed" in combined:
-            raise RuntimeError(f"adduser failed: {(stdout + stderr).strip()}")
-        logger.info("add_user on %s: %s %s", self._host, stdout.strip(), stderr.strip())
-
-    async def remove_user(self, inbound_tag: str, user_uuid: str) -> None:
-        # Xray v25+: новый формат API
-        cmd = (
-            f"xray api removeuser "
-            f"--server=127.0.0.1:{self._api_port} "
-            f"--inbound={inbound_tag} "
-            f"--user={user_uuid}"
-        )
-        stdout, stderr = await self._ssh.run_command(cmd)
-        logger.info("remove_user on %s: %s %s", self._host, stdout.strip(), stderr.strip())
+    async def get_stats(self) -> dict | None:
+        """Получить статистику Xray (если доступна через API port)."""
+        # TODO: Реализовать через HTTP stats API если нужно
+        logger.debug("Stats API not implemented for Xray v25+")
+        return None

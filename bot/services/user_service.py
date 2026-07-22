@@ -79,33 +79,21 @@ class UserService:
     async def _add_user_to_running_nodes(
         self, exit_node: Node, exit_ssh_key: SSHKey, user_uuid: str
     ) -> None:
-        """Горячее добавление юзера в Exit и привязанные Bridge без рестарта.
+        """Горячее добавление юзера в Exit и привязанные Bridge через Xray API.
 
-        При любой ошибке откатываемся на полный безопасный redeploy
-        (test+restart+rollback), который рендерит конфиг из БД — источника истины.
+        Xray v25+: API команды adduser/removeuser НЕ поддерживаются напрямую.
+        Вместо этого делаем redeploy ноды (тест+рестарт+rollback при ошибке).
         """
+        if not self._node_service:
+            logger.warning("NodeService not available, cannot add user to nodes")
+            return
+
         try:
-            xray = self._make_xray_client(exit_node, exit_ssh_key)
-            await xray.add_user("inbound-vless", user_uuid, flow="")
-
-            async with self._session_factory() as session:
-                bridge_rows = await session.execute(
-                    select(Node, SSHKey)
-                    .join(NodeLink, NodeLink.bridge_id == Node.id)
-                    .join(SSHKey, SSHKey.id == Node.ssh_key_id)
-                    .where(NodeLink.exit_id == exit_node.id, Node.role == "bridge")
-                )
-                bridges = list(bridge_rows.all())
-
-            for bridge, bridge_key in bridges:
-                if not bridge.ip:
-                    continue
-                bxray = self._make_xray_client(bridge, bridge_key)
-                await bxray.add_user("inbound-client", user_uuid, flow="")
-        except Exception:
-            logger.exception("adduser fast-path failed, falling back to redeploy")
-            if self._node_service:
-                await self._node_service.redeploy_exit_with_bridges(exit_node.id)
+            await self._node_service.redeploy_exit_with_bridges(exit_node.id)
+            logger.info("User %s added to node %d via redeploy", user_uuid, exit_node.id)
+        except Exception as e:
+            logger.exception("Failed to redeploy node %d for user add", exit_node.id)
+            raise
 
     async def _get_node_with_key(self, node_id: int) -> tuple[Node | None, SSHKey | None]:
         async with self._session_factory() as session:
@@ -388,6 +376,124 @@ class UserService:
         qr_bytes = self._generate_qr_code(vless_url)
         return vless_url, qr_bytes
 
+    async def add_node_to_subscription(self, user_id: int, node_id: int) -> dict:
+        """Add an exit node to user's subscription (M:N).
+
+        Returns dict with result status and details.
+        """
+        async with self._session_factory() as session:
+            # Check user exists
+            user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+            if not user:
+                return {"success": False, "error": f"User {user_id} not found"}
+
+            # Check node exists and is exit
+            node = (await session.execute(select(Node).where(Node.id == node_id))).scalar_one_or_none()
+            if not node:
+                return {"success": False, "error": f"Node {node_id} not found"}
+            if node.role != "exit":
+                return {"success": False, "error": f"Node {node_id} is not an exit node"}
+
+            # Check if already in subscription
+            existing = (await session.execute(
+                select(UserNode).where(UserNode.user_id == user_id, UserNode.exit_node_id == node_id)
+            )).scalar_one_or_none()
+            if existing:
+                return {"success": False, "error": f"Node {node_id} already in subscription"}
+
+            # Add to subscription
+            session.add(UserNode(user_id=user_id, exit_node_id=node_id))
+            await session.commit()
+
+        # Hot-add user to the new node
+        node_key = await self._get_node_with_key(node_id)
+        if node_key[0] and node_key[1] and node.ip:
+            try:
+                await self._add_user_to_running_nodes(node_key[0], node_key[1], user.uuid)
+            except Exception as e:
+                logger.exception("Failed to hot-add user to node %d", node_id)
+                return {"success": False, "error": f"Added to DB but hot-add failed: {e}"}
+
+        return {"success": True, "node_name": node.name, "message": f"Node {node.name} added to subscription"}
+
+    async def remove_node_from_subscription(self, user_id: int, node_id: int) -> dict:
+        """Remove an exit node from user's subscription (M:N).
+
+        Returns dict with result status and details.
+        """
+        async with self._session_factory() as session:
+            # Check user exists
+            user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+            if not user:
+                return {"success": False, "error": f"User {user_id} not found"}
+
+            # Check node exists
+            node = (await session.execute(select(Node).where(Node.id == node_id))).scalar_one_or_none()
+            if not node:
+                return {"success": False, "error": f"Node {node_id} not found"}
+
+            # Check if in subscription
+            user_node = (await session.execute(
+                select(UserNode).where(UserNode.user_id == user_id, UserNode.exit_node_id == node_id)
+            )).scalar_one_or_none()
+            if not user_node:
+                return {"success": False, "error": f"Node {node_id} not in subscription"}
+
+            # Can't remove primary exit node
+            if user.exit_node_id == node_id:
+                return {"success": False, "error": "Cannot remove primary exit node (change primary first)"}
+
+            # Delete M:N record first
+            await session.delete(user_node)
+            await session.commit()
+
+        # Redeploy node to update config (remove user from Xray)
+        if self._node_service:
+            try:
+                await self._node_service.redeploy_exit_with_bridges(node_id)
+                logger.info("Node %d redeployed after removing user %d", node_id, user_id)
+            except Exception as e:
+                logger.exception("Failed to redeploy node %d after removal", node_id)
+                # Rollback: restore the M:N record
+                async with self._session_factory() as session:
+                    session.add(UserNode(user_id=user_id, exit_node_id=node_id))
+                    await session.commit()
+                return {"success": False, "error": f"Redeploy failed: {e}"}
+
+        return {"success": True, "node_name": node.name, "message": f"Node {node.name} removed from subscription"}
+
+    async def get_subscription_nodes(self, user_id: int) -> list[Node]:
+        """Get all exit nodes in user's subscription."""
+        return await self.get_user_nodes(user_id)
+
+    async def set_primary_exit_node(self, user_id: int, node_id: int) -> dict:
+        """Set primary exit node for user.
+
+        This changes User.exit_node_id (the main node for this user).
+        """
+        async with self._session_factory() as session:
+            user = (await session.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+            if not user:
+                return {"success": False, "error": f"User {user_id} not found"}
+
+            node = (await session.execute(select(Node).where(Node.id == node_id))).scalar_one_or_none()
+            if not node:
+                return {"success": False, "error": f"Node {node_id} not found"}
+            if node.role != "exit":
+                return {"success": False, "error": f"Node {node_id} is not an exit node"}
+
+            # Ensure node is in subscription
+            existing = (await session.execute(
+                select(UserNode).where(UserNode.user_id == user_id, UserNode.exit_node_id == node_id)
+            )).scalar_one_or_none()
+            if not existing:
+                session.add(UserNode(user_id=user_id, exit_node_id=node_id))
+
+            user.exit_node_id = node_id
+            await session.commit()
+
+        return {"success": True, "node_name": node.name, "message": f"Primary exit set to {node.name}"}
+
     async def deactivate_user(self, user_id: int, delete_from_db: bool = False) -> None:
         async with self._session_factory() as session:
             result = await session.execute(select(User).where(User.id == user_id))
@@ -396,17 +502,18 @@ class UserService:
                 raise ValueError(f"User {user_id} not found")
             user_uuid = user.uuid
 
-        # Все exit-ноды юзера (M:N) — снять uuid с каждой (+ bridge через redeploy fallback).
+        # Все exit-ноды юзера (M:N) — redeploy для удаления UUID из конфигов.
         exit_nodes = await self.get_user_nodes(user_id)
         exit_ids = [n.id for n in exit_nodes]
-        for node in exit_nodes:
-            _, key = await self._get_node_with_key(node.id)
-            if key and node.ip:
+
+        # Redeploy all nodes to remove user from configs
+        if self._node_service:
+            for eid in exit_nodes:
                 try:
-                    xray = self._make_xray_client(node, key)
-                    await xray.remove_user("inbound-vless", user_uuid)
-                except Exception:
-                    logger.exception("remove_user failed on node %d", node.id)
+                    await self._node_service.redeploy_exit_with_bridges(eid.id)
+                    logger.info("User %s removed from node %d via redeploy", user_uuid, eid.id)
+                except Exception as e:
+                    logger.exception("redeploy failed on node %d for user deactivation", eid.id)
 
         async with self._session_factory() as session:
             result = await session.execute(select(User).where(User.id == user_id))
@@ -422,7 +529,3 @@ class UserService:
             else:
                 user.is_active = False
             await session.commit()
-
-        if self._node_service:
-            for eid in exit_ids:
-                await self._node_service.redeploy_exit_with_bridges(eid)
