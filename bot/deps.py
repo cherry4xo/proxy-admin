@@ -9,12 +9,14 @@ from bot.services.cloud.yandex_iam import IamTokenProvider, ServiceAccountKey
 from bot.services.cloud.yandex_nlb import YandexNLBClient
 from bot.services.node_service import NodeService
 from bot.services.user_service import UserService
+from bot.services.sni_rotation_service import SNIRotationService
 
 
 @dataclass
 class Deps:
     node_service: NodeService
     user_service: UserService
+    sni_rotation_service: SNIRotationService
     bitlaunch: BitLaunchClient
     yandex: YandexClient
     nlb: YandexNLBClient
@@ -43,6 +45,7 @@ def build_deps() -> Deps:
         verify_ssl=settings.HTTPX_VERIFY,
     )
     cert_service = CertService(session_factory=async_session_factory)
+    sni_rotation_service = SNIRotationService(session_factory=async_session_factory)
     node_service = NodeService(
         bitlaunch=bitlaunch,
         yandex=yandex,
@@ -56,6 +59,7 @@ def build_deps() -> Deps:
     return Deps(
         node_service=node_service,
         user_service=user_service,
+        sni_rotation_service=sni_rotation_service,
         bitlaunch=bitlaunch,
         yandex=yandex,
         nlb=nlb,

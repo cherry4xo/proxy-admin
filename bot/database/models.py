@@ -39,6 +39,13 @@ class Node(Base):
     short_id: Mapped[str | None] = mapped_column(String, nullable=True)
     reality_sni: Mapped[str | None] = mapped_column(String, nullable=True)
 
+    # Dynamic SNI: пул доменов для ротации (шифрованный JSON-список), текущий индекс,
+    # последняя ротация и интервал (часы). NULL => статический SNI (legacy).
+    sni_pool_encrypted: Mapped[str | None] = mapped_column(String, nullable=True)
+    current_sni_index: Mapped[int | None] = mapped_column(Integer, default=0)
+    last_sni_rotation_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sni_rotation_interval_h: Mapped[int | None] = mapped_column(Integer, default=24)
+
     # Bridge-only: единый VLESS uuid, которым Bridge аутентифицируется на Exit.
     bridge_uuid: Mapped[str | None] = mapped_column(String, nullable=True)
 

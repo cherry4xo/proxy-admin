@@ -90,6 +90,20 @@ class WarpOffFSM(StatesGroup):
     node_id = State()
 
 
+class SNIPoolFSM(StatesGroup):
+    node_id = State()
+    domains = State()
+
+
+class SNIRotateFSM(StatesGroup):
+    node_id = State()
+
+
+class SNIIntervalFSM(StatesGroup):
+    node_id = State()
+    hours = State()
+
+
 @router.callback_query(F.data == "node:list_db")
 async def cb_list_db_nodes(callback: CallbackQuery, deps: Deps) -> None:
     nodes = await deps.node_service.list_nodes()
@@ -1256,3 +1270,220 @@ async def fsm_warp_off_node_id(message: Message, state: FSMContext, deps: Deps) 
             reply_markup=back_keyboard(),
             parse_mode="HTML",
         )
+
+
+# ==================== Dynamic SNI Handlers ====================
+
+@router.callback_query(F.data == "node:sni_status")
+async def cb_sni_status(callback: CallbackQuery, deps: Deps) -> None:
+    """Show SNI status for all nodes."""
+    if not deps.sni_rotation_service:
+        await callback.answer("SNI rotation service not configured", show_alert=True)
+        return
+
+    nodes = await deps.node_service.list_nodes()
+    if not nodes:
+        await callback.message.edit_text("Нод в базе нет.", reply_markup=back_keyboard())  # type: ignore[union-attr]
+        await callback.answer()
+        return
+
+    text = "🔄 <b>SNI Status</b>\n\n"
+    for node in nodes:
+        current_sni = deps.sni_rotation_service._get_current_sni(node)
+        pool_size = len(deps.sni_rotation_service._get_sni_pool(node)) if node.sni_pool_encrypted else 0
+        interval = node.sni_rotation_interval_h or 24
+        last_rot = node.last_sni_rotation_at.strftime("%Y-%m-%d %H:%M") if node.last_sni_rotation_at else "Never"
+        text += (
+            f"<b>{node.name}</b> ({node.role})\n"
+            f"  Current SNI: {current_sni}\n"
+            f"  Pool size: {pool_size} domains\n"
+            f"  Rotation: every {interval}h\n"
+            f"  Last rotated: {last_rot}\n\n"
+        )
+
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text,
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "node:sni_pool_set")
+async def cb_sni_pool_start(callback: CallbackQuery, state: FSMContext) -> None:
+    """Start setting SNI pool for a node."""
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID ноды для настройки SNI pool:",
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(SNIPoolFSM.node_id)
+    await callback.answer()
+
+
+@router.message(SNIPoolFSM.node_id)
+async def fsm_sni_pool_node_id(message: Message, state: FSMContext) -> None:
+    try:
+        node_id = int(message.text or "")
+    except ValueError:
+        await message.answer("Введите числовой ID:")
+        return
+
+    await state.update_data(node_id=node_id)
+    await state.set_state(SNIPoolFSM.domains)
+    await message.answer(
+        "Введите список доменов через запятую (например: dl.google.com,www.microsoft.com,cdn.apple.com):\n\n"
+        "Или отправьте /cancel для отмены.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(SNIPoolFSM.domains)
+async def fsm_sni_pool_domains(message: Message, state: FSMContext, deps: Deps) -> None:
+    if not deps.sni_rotation_service:
+        await message.answer("SNI rotation service not configured.")
+        await state.clear()
+        return
+
+    data = await state.get_data()
+    node_id = data.get("node_id")
+
+    domains_str = message.text.strip()
+    if domains_str.lower() in ["/cancel", "отмена"]:
+        await state.clear()
+        await message.answer("Настройка SNI pool отменена.", reply_markup=back_keyboard())
+        return
+
+    domains = [d.strip() for d in domains_str.split(",") if d.strip()]
+    if not domains:
+        await message.answer("Список не может быть пустым. Введите домены ещё раз:")
+        return
+
+    await message.answer("Сохраняю SNI pool и перезагружаю конфиг...")
+
+    result = await deps.sni_rotation_service.set_sni_pool(node_id, domains)
+    if result["success"]:
+        await message.answer(
+            f"✅ SNI pool установлен для ноды {node_id}:\n"
+            f"  Доменов: {len(domains)}\n"
+            f"  Текущий SNI: {result['current_sni']}\n\n"
+            f"Список: {', '.join(domains)}",
+            reply_markup=back_keyboard(),
+        )
+    else:
+        await message.answer(
+            f"❌ Ошибка: {result.get('error', 'Unknown error')}",
+            reply_markup=back_keyboard(),
+        )
+
+    await state.clear()
+
+
+@router.callback_query(F.data == "node:sni_rotate")
+async def cb_sni_rotate_start(callback: CallbackQuery, state: FSMContext) -> None:
+    """Start SNI rotation for a node."""
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID ноды для ротации SNI:\n"
+        "Можно добавить <b>force</b> для принудительной ротации (например: <code>5 force</code>)",
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(SNIRotateFSM.node_id)
+    await callback.answer()
+
+
+@router.message(SNIRotateFSM.node_id)
+async def fsm_sni_rotate_node_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    if not deps.sni_rotation_service:
+        await message.answer("SNI rotation service not configured.")
+        await state.clear()
+        return
+
+    parts = (message.text or "").strip().split()
+    if not parts:
+        await message.answer("Введите ID ноды:")
+        return
+
+    try:
+        node_id = int(parts[0])
+    except ValueError:
+        await message.answer("ID должен быть числом:")
+        return
+
+    force = len(parts) > 1 and parts[1].lower() in ["force", "f"]
+
+    await message.answer("Выполняю ротацию SNI...")
+    result = await deps.sni_rotation_service.rotate_sni(node_id, force=force)
+
+    if result.get("success"):
+        health_summary = "✓" if result["health_checks"][-1]["healthy"] else "✗"
+        await message.answer(
+            f"✅ SNI ротирована для ноды {node_id}:\n"
+            f"  Было: {result['old_sni']} (index {result['old_index']})\n"
+            f"  Стало: {result['new_sni']} (index {result['new_index']})\n"
+            f"  Конфиг обновлён: {'Да' if result['config_reloaded'] else 'Нет'}\n"
+            f"  Health последнего кандидата: {health_summary}",
+            reply_markup=back_keyboard(),
+        )
+    elif result.get("skipped"):
+        await message.answer(
+            f"⏸ Ротация пропущена: {result['message']}",
+            reply_markup=back_keyboard(),
+        )
+    else:
+        await message.answer(
+            f"❌ Ошибка ротации: {result.get('error', 'Unknown error')}",
+            reply_markup=back_keyboard(),
+        )
+
+    await state.clear()
+
+
+@router.callback_query(F.data == "node:sni_interval")
+async def cb_sni_interval_start(callback: CallbackQuery, state: FSMContext) -> None:
+    """Set SNI rotation interval."""
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID ноды и интервал ротации в часах (1-168):\n"
+        "Формат: <code>&lt;node_id&gt; &lt;hours&gt;</code> (например: 5 24)",
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(SNIIntervalFSM.node_id)
+    await callback.answer()
+
+
+@router.message(SNIIntervalFSM.node_id)
+async def fsm_sni_interval_node_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    if not deps.sni_rotation_service:
+        await message.answer("SNI rotation service not configured.")
+        await state.clear()
+        return
+
+    try:
+        parts = (message.text or "").strip().split()
+        if len(parts) < 2:
+            await message.answer("Введите ID и интервал через пробел (например: 5 24):")
+            return
+        node_id = int(parts[0])
+        hours = int(parts[1])
+        if not 1 <= hours <= 168:
+            await message.answer("Интервал должен быть 1-168 часов. Введите ещё раз:")
+            return
+    except ValueError:
+        await message.answer("ID и интервал должны быть числами. Введите ещё раз:")
+        return
+
+    result = await deps.sni_rotation_service.set_rotation_interval(node_id, hours)
+    if result["success"]:
+        await message.answer(
+            f"✅ Интервал ротации установлен: {hours}ч\n"
+            f"Следующая ротация через {hours} часов после последней.",
+            reply_markup=back_keyboard(),
+        )
+    else:
+        await message.answer(
+            f"❌ Ошибка: {result.get('error', 'Unknown error')}",
+            reply_markup=back_keyboard(),
+        )
+
+    await state.clear()

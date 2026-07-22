@@ -54,6 +54,14 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🚫 WARP выкл (Exit)", callback_data="node:warp_off"),
     )
     builder.row(
+        InlineKeyboardButton(text="🔄 SNI: статус", callback_data="node:sni_status"),
+        InlineKeyboardButton(text="🔁 SNI: ротация", callback_data="node:sni_rotate"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="📦 SNI: настроить pool", callback_data="node:sni_pool_set"),
+        InlineKeyboardButton(text="⏱ SNI: интервал", callback_data="node:sni_interval"),
+    )
+    builder.row(
         InlineKeyboardButton(text="🌐 BitLaunch (live)", callback_data="node:list_bitlaunch"),
         InlineKeyboardButton(text="🌐 Yandex Cloud (live)", callback_data="node:list_yandex"),
     )
