@@ -58,27 +58,104 @@ async def _extra_nodes_keyboard(deps: Deps, primary_id: int, selected: set[int])
     return builder.as_markup()
 
 
+def _user_list_keyboard(page: int, total_pages: int, total_users: int) -> InlineKeyboardBuilder:
+    """Клавиатура для пагинации списка пользователей."""
+    builder = InlineKeyboardBuilder()
+    
+    # Навигация
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"userlist:page:{page-1}"))
+    
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(text="➡️ Вперёд", callback_data=f"userlist:page:{page+1}"))
+    
+    if nav_row:
+        builder.row(*nav_row)
+    
+    # Инфо
+    builder.row(InlineKeyboardButton(
+        text=f"📊 Стр. {page+1}/{total_pages} ({total_users} юзеров)",
+        callback_data="userlist:info"
+    ))
+    
+    builder.row(InlineKeyboardButton(text="« Главное меню", callback_data="menu:main"))
+    return builder
+
+
+USERS_PER_PAGE = 10
+
+
 @router.callback_query(F.data == "user:list")
 async def cb_user_list(callback: CallbackQuery, deps: Deps) -> None:
+    """Показать первую страницу списка пользователей."""
+    await show_user_list_page(callback, deps, 0)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("userlist:page:"))
+async def cb_user_list_page(callback: CallbackQuery, deps: Deps) -> None:
+    """Обработчик навигации по страницам списка пользователей."""
+    try:
+        page = int(callback.data.split(":")[2])
+    except (IndexError, ValueError):
+        page = 0
+    
+    await show_user_list_page(callback, deps, page)
+    await callback.answer()
+
+
+@router.callback_query(F.data == "userlist:info")
+async def cb_user_list_info(callback: CallbackQuery) -> None:
+    """Инфо-кнопка (просто подтверждение)."""
+    await callback.answer("ℹ️ Используйте ⬅️/➡️ для навигации по страницам")
+
+
+async def show_user_list_page(callback: CallbackQuery | None, deps: Deps, page: int) -> None:
+    """Показать страницу списка пользователей."""
     users = await deps.user_service.list_users()
-
+    
     if not users:
-        await callback.message.edit_text("Пользователей нет.", reply_markup=back_keyboard())  # type: ignore[union-attr]
-        await callback.answer()
+        if callback:
+            await callback.message.edit_text("Пользователей нет.", reply_markup=back_keyboard())
+            await callback.answer()
         return
-
-    lines = ["<b>Пользователи:</b>\n"]
-    for u in users:
+    
+    total_users = len(users)
+    total_pages = (total_users + USERS_PER_PAGE - 1) // USERS_PER_PAGE
+    
+    # Проверка границ
+    if page < 0:
+        page = 0
+    elif page >= total_pages:
+        page = total_pages - 1
+    
+    # Срез для текущей страницы
+    start_idx = page * USERS_PER_PAGE
+    end_idx = min(start_idx + USERS_PER_PAGE, total_users)
+    page_users = users[start_idx:end_idx]
+    
+    lines = [f"<b>Пользователи (стр. {page+1}/{total_pages}):</b>\n"]
+    for i, u in enumerate(page_users, start=start_idx + 1):
         status = "🟢 активен" if u.is_active else "🔴 заблокирован"
         tg = f"TG: {u.telegram_id}" if u.telegram_id else "без TG"
         lines.append(
-            f"[{u.id}] <b>{u.name}</b> ({tg}) — {status}\n"
+            f"{i}. [{u.id}] <b>{u.name}</b> ({tg}) — {status}\n"
             f"   UUID: <code>{u.uuid}</code>\n"
-            f"   Exit Node: #{u.exit_node_id}"
+            f"   Exit: #{u.exit_node_id}\n"
         )
-
-    await callback.message.edit_text("\n".join(lines), reply_markup=back_keyboard(), parse_mode="HTML")  # type: ignore[union-attr]
-    await callback.answer()
+    
+    keyboard = _user_list_keyboard(page, total_pages, total_users)
+    
+    if callback:
+        await callback.message.edit_text(
+            "\n".join(lines),
+            reply_markup=keyboard.as_markup(),
+            parse_mode="HTML"
+        )
+    else:
+        # Для первого вызова без callback
+        pass  # Вызывается через cb_user_list
 
 
 @router.callback_query(F.data == "user:create")

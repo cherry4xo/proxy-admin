@@ -215,9 +215,10 @@ class SNIRotationService:
                     "health_checks": health_checks
                 }
 
-            # Update node
+            # Update node in DB
             node.current_sni_index = new_index
             node.last_sni_rotation_at = now
+            node.reality_sni = new_sni  # ← Важно: обновляем reality_sni для подписки!
             await session.commit()
 
             # Hot reload Xray config
@@ -227,9 +228,10 @@ class SNIRotationService:
             except Exception as e:
                 logger.exception("Failed to reload config after SNI rotation")
                 reload_success = False
-                # Rollback
+                # Rollback DB changes
                 node.current_sni_index = old_index
                 node.last_sni_rotation_at = last_rotation
+                node.reality_sni = current_sni
                 await session.commit()
 
             return {
@@ -344,8 +346,15 @@ class SNIRotationService:
             )
 
         # Deploy config via SSH
+        logger.info(
+            "SNI rotation: deploying config to node %d (role=%s, new_sni=%s)",
+            node.id, node.role, self._get_current_sni(node)
+        )
         await ssh.deploy_xray_config(config_json, xray_runtime=settings.XRAY_RUNTIME)
-        logger.info("SNI rotation: config reloaded for node %d", node.id)
+        logger.info(
+            "SNI rotation: ✅ config deployed and Xray restarted on node %d (now serving SNI: %s)",
+            node.id, self._get_current_sni(node)
+        )
 
     async def set_sni_pool(self, node_id: int, pool: list[str]) -> dict[str, Any]:
         """Set custom SNI pool for a node.
@@ -373,6 +382,7 @@ class SNIRotationService:
             self._save_sni_pool(node, pool)
             node.current_sni_index = 0
             node.last_sni_rotation_at = datetime.utcnow()
+            node.reality_sni = pool[0]  # ← Обновляем reality_sni первым доменом из пула
             await session.commit()
 
         # Reload config
