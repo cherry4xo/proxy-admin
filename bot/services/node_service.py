@@ -684,6 +684,34 @@ class NodeService:
             await session.delete(node)
             await session.commit()
 
+    async def unlink_nodes(self, bridge_id: int, exit_id: int | None = None) -> dict:
+        """Unlink a bridge from an exit node.
+        
+        Args:
+            bridge_id: Bridge node ID
+            exit_id: Optional exit node ID (if None, unlink any exit)
+            
+        Returns:
+            Dict with result status and details
+        """
+        async with self._session_factory() as session:
+            # Find the link
+            query = sql_delete(NodeLink).where(NodeLink.bridge_id == bridge_id)
+            if exit_id is not None:
+                query = query.where(NodeLink.exit_id == exit_id)
+            
+            result = await session.execute(query)
+            deleted_count = result.rowcount
+            await session.commit()
+            
+            if deleted_count == 0:
+                return {"success": False, "error": "No link found to delete"}
+                
+        return {
+            "success": True,
+            "message": f"Bridge #{bridge_id} отвязан от Exit #{exit_id}" if exit_id else f"Bridge #{bridge_id} отвязан"
+        }
+
     async def recreate_bridge_node(self, bridge_node_id: int) -> Node:
         async with self._session_factory() as session:
             result = await session.execute(

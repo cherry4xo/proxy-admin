@@ -15,6 +15,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
     )
     builder.row(
         InlineKeyboardButton(text="🔗 Привязать Bridge → Exit", callback_data="node:link"),
+        InlineKeyboardButton(text="✂️ Отвязать Bridge → Exit", callback_data="node:unlink"),
     )
     builder.row(
         InlineKeyboardButton(text="📜 Загрузить сертификат", callback_data="node:upload_cert"),

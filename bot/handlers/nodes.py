@@ -49,6 +49,10 @@ class LinkNodeFSM(StatesGroup):
     exit_id = State()
 
 
+class UnlinkNodeFSM(StatesGroup):
+    bridge_id = State()
+
+
 class ImportNodeFSM(StatesGroup):
     server_index = State()
     role = State()
@@ -638,6 +642,67 @@ async def fsm_link_exit_id(message: Message, state: FSMContext, deps: Deps) -> N
         await message.answer(f"Связь Bridge #{bridge_id} → Exit #{exit_id} создана.", reply_markup=back_keyboard())
     except Exception as e:
         await message.answer(f"Ошибка:\n<code>{e}</code>", reply_markup=back_keyboard(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "node:unlink")
+async def cb_unlink_nodes_start(callback: CallbackQuery, state: FSMContext, deps: Deps) -> None:
+    """Start unlinking a bridge from exit node."""
+    async with deps.session_factory() as session:
+        from bot.database.models import NodeLink, Node
+        from sqlalchemy import select
+        
+        # Get all linked bridges
+        result = await session.execute(
+            select(Node, Node)
+            .join(NodeLink, NodeLink.bridge_id == Node.id)
+            .join(Node, Node.id == NodeLink.exit_id)
+        )
+        links = result.all()
+    
+    if not links:
+        await callback.message.edit_text(
+            "Нет привязанных Bridge → Exit связей.",
+            reply_markup=back_keyboard()
+        )
+        await callback.answer()
+        return
+    
+    builder = InlineKeyboardBuilder()
+    for bridge, exit_node in links:
+        builder.row(InlineKeyboardButton(
+            text=f"✂️ [{bridge.id}] {bridge.name} → [{exit_node.id}] {exit_node.name}",
+            callback_data=f"unlink:confirm:{bridge.id}:{exit_node.id}"
+        ))
+    
+    builder.row(InlineKeyboardButton(text="« Назад", callback_data="menu:main"))
+    
+    await callback.message.edit_text(
+        "Выберите связь для разрыва:",
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("unlink:confirm:"))
+async def cb_unlink_confirm(callback: CallbackQuery, deps: Deps) -> None:
+    """Confirm unlinking bridge from exit."""
+    parts = callback.data.split(":")
+    bridge_id = int(parts[2])
+    exit_id = int(parts[3])
+    
+    result = await deps.node_service.unlink_nodes(bridge_id, exit_id)
+    
+    if result["success"]:
+        await callback.message.edit_text(
+            f"✅ {result['message']}",
+            reply_markup=back_keyboard()
+        )
+    else:
+        await callback.message.edit_text(
+            f"❌ Ошибка: {result.get('error', 'Unknown error')}",
+            reply_markup=back_keyboard()
+        )
+    await callback.answer()
 
 
 def _build_import_provider_keyboard() -> Any:
