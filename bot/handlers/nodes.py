@@ -651,11 +651,13 @@ async def cb_unlink_nodes_start(callback: CallbackQuery, state: FSMContext, deps
         from bot.database.models import NodeLink, Node
         from sqlalchemy import select
         
-        # Get all linked bridges
+        # Get all linked bridges with proper aliases
+        exit_node_alias = Node.__table__.alias()
+        
         result = await session.execute(
-            select(Node, Node)
+            select(Node, exit_node_alias)
             .join(NodeLink, NodeLink.bridge_id == Node.id)
-            .join(Node, Node.id == NodeLink.exit_id)
+            .join(exit_node_alias, exit_node_alias.c.id == NodeLink.exit_id)
         )
         links = result.all()
     
@@ -668,10 +670,15 @@ async def cb_unlink_nodes_start(callback: CallbackQuery, state: FSMContext, deps
         return
     
     builder = InlineKeyboardBuilder()
-    for bridge, exit_node in links:
+    for bridge_row, exit_row in links:
+        bridge_id = bridge_row.id
+        bridge_name = bridge_row.name
+        exit_id = exit_row.id
+        exit_name = exit_row.name
+        
         builder.row(InlineKeyboardButton(
-            text=f"✂️ [{bridge.id}] {bridge.name} → [{exit_node.id}] {exit_node.name}",
-            callback_data=f"unlink:confirm:{bridge.id}:{exit_node.id}"
+            text=f"✂️ [{bridge_id}] {bridge_name} → [{exit_id}] {exit_name}",
+            callback_data=f"unlink:confirm:{bridge_id}:{exit_id}"
         ))
     
     builder.row(InlineKeyboardButton(text="« Назад", callback_data="menu:main"))
