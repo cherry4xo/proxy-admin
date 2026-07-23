@@ -650,17 +650,22 @@ async def cb_unlink_nodes_start(callback: CallbackQuery, state: FSMContext, deps
     async with deps.session_factory() as session:
         from bot.database.models import NodeLink, Node
         from sqlalchemy import select
-        
+
         # Get all linked bridges with proper aliases
         exit_node_alias = Node.__table__.alias()
-        
+
         result = await session.execute(
-            select(Node, exit_node_alias)
+            select(
+                Node.id.label("bridge_id"),
+                Node.name.label("bridge_name"),
+                exit_node_alias.c.id.label("exit_id"),
+                exit_node_alias.c.name.label("exit_name"),
+            )
             .join(NodeLink, NodeLink.bridge_id == Node.id)
             .join(exit_node_alias, exit_node_alias.c.id == NodeLink.exit_id)
         )
         links = result.all()
-    
+
     if not links:
         await callback.message.edit_text(
             "Нет привязанных Bridge → Exit связей.",
@@ -668,21 +673,21 @@ async def cb_unlink_nodes_start(callback: CallbackQuery, state: FSMContext, deps
         )
         await callback.answer()
         return
-    
+
     builder = InlineKeyboardBuilder()
-    for bridge_row, exit_row in links:
-        bridge_id = bridge_row.id
-        bridge_name = bridge_row.name
-        exit_id = exit_row.id
-        exit_name = exit_row.name
-        
+    for row in links:
+        bridge_id = row.bridge_id
+        bridge_name = row.bridge_name
+        exit_id = row.exit_id
+        exit_name = row.exit_name
+
         builder.row(InlineKeyboardButton(
             text=f"✂️ [{bridge_id}] {bridge_name} → [{exit_id}] {exit_name}",
             callback_data=f"unlink:confirm:{bridge_id}:{exit_id}"
         ))
-    
+
     builder.row(InlineKeyboardButton(text="« Назад", callback_data="menu:main"))
-    
+
     await callback.message.edit_text(
         "Выберите связь для разрыва:",
         reply_markup=builder.as_markup()
