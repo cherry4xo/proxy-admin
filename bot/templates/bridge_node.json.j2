@@ -27,7 +27,7 @@
         "decryption": "none"
       },
       "streamSettings": {
-        "network": "xhttp",
+        "network": "tcp",
         "security": "reality",
         "realitySettings": {
           "show": false,
@@ -37,10 +37,10 @@
           "privateKey": "{{ bridge_x25519_private }}",
           "shortIds": [{% for sid in bridge_short_ids %}"{{ sid }}"{% if not loop.last %}, {% endif %}{% endfor %}]
         },
-        "xhttpSettings": {
-          "path": "{{ bridge_xhttp_path }}",
-          "host": "{{ bridge_xhttp_host }}",
-          "mode": "auto"
+        "tcpSettings": {
+          "header": {
+            "type": "none"
+          }
         }
       },
       "sniffing": {
@@ -63,27 +63,25 @@
               {
                 "id": "{{ bridge_uuid }}",
                 "encryption": "none",
-                "flow": ""
+                "flow": "xtls-rprx-vision"
               }
             ]
           }
         ]
       },
       "streamSettings": {
-        "network": "xhttp",
+        "network": "tcp",
         "security": "reality",
         "realitySettings": {
           "serverName": "{{ reality_sni }}",
           "fingerprint": "{{ fingerprint }}",
           "publicKey": "{{ x25519_public }}",
-          "shortId": "{{ short_id }}",
-          "spiderX": "/",
-          "flow": "xtls-rprx-vision"
+          "shortId": "{{ short_id }}"
         },
-        "xhttpSettings": {
-          "path": "{{ xhttp_path }}",
-          "host": "{{ xhttp_host }}",
-          "mode": "auto"
+        "tcpSettings": {
+          "header": {
+            "type": "none"
+          }
         }
       }
     },

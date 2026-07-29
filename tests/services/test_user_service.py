@@ -297,9 +297,10 @@ def test_build_vless_url_contains_expected_parts(service: UserService, remark: s
     assert "vless://uuid-1@1.2.3.4:443" in url
     assert expected_fragment in url
     assert "security=reality" in url
-    # fingerprint из config (мок conftest = chrome) + spiderX для мимикрии handshake
+    # fingerprint из config (мок conftest = chrome) + TCP transport for vision flow
     assert "fp=chrome" in url
-    assert "spx=%2F" in url
+    assert "flow=xtls-rprx-vision" in url
+    assert "type=tcp" in url
 
 
 def test_generate_qr_code_returns_png_bytes(service: UserService):

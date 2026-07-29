@@ -51,11 +51,9 @@ class UserService:
             f"fp={settings.FINGERPRINT}",
             f"pbk={x25519_public}",
             f"sid={first_short_id}",
-            "flow=xtls-rprx-vision",  # Vision flow for stable REALITY connection
-            "spx=%2F",  # spiderX=/ — улучшает мимикрию REALITY-handshake
-            "type=xhttp",
-            f"path={quote(xhttp_path)}",
-            f"host={effective_host}",
+            "flow=xtls-rprx-vision",  # Vision flow for stable REALITY connection (requires TCP)
+            "type=tcp",  # TCP transport (required for vision flow)
+            f"host={effective_host}",  # For compatibility
         ])
         return f"vless://{user_uuid}@{exit_node_ip}:{port}?{params}#{quote(remark)}"
 

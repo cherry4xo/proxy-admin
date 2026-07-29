@@ -26,7 +26,7 @@
         "decryption": "none"
       },
       "streamSettings": {
-        "network": "xhttp",
+        "network": "tcp",
         "security": "reality",
         "realitySettings": {
           "show": false,
@@ -36,15 +36,10 @@
           "privateKey": "{{ x25519_private }}",
           "shortIds": [{% for sid in short_ids %}"{{ sid }}"{% if not loop.last %}, {% endif %}{% endfor %}]
         },
-        "xhttpSettings": {
-          "path": "{{ xhttp_path }}",
-          "host": "{{ xhttp_host }}",
-          "scMaxBufferedPosts": 30,
-          "scMaxEachPostBytes": "1000000",
-          "scStreamUpServerSecs": "20-80",
-          "noSSEHeader": false,
-          "xPaddingBytes": "100-1000",
-          "mode": "auto"
+        "tcpSettings": {
+          "header": {
+            "type": "none"
+          }
         }
       },
       "sniffing": {

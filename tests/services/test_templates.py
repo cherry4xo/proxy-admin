@@ -135,16 +135,22 @@ def test_outbound_proxy_exit_unchanged_in_domain_mode():
     # плечо bridge↔exit использует ключи/SNI exit — не затронуто доменом
     assert rs["publicKey"] == "EXITPUB"
     assert rs["serverName"] == "www.microsoft.com"
-    assert proxy_exit["settings"]["vnext"][0]["users"][0]["flow"] == ""
+    # Vision flow for stable REALITY connection
+    assert proxy_exit["settings"]["vnext"][0]["users"][0]["flow"] == "xtls-rprx-vision"
 
 
-def test_proxy_exit_has_spiderx_and_configurable_fingerprint():
+def test_proxy_exit_has_tcp_and_configurable_fingerprint():
     out = render_bridge_node_config(bridge_reality_sni="www.microsoft.com", fingerprint="firefox", **_BASE)
     d = json.loads(out)
-    rs = next(o for o in d["outbounds"] if o.get("tag") == "proxy-exit")[
-        "streamSettings"
-    ]["realitySettings"]
-    assert rs["spiderX"] == "/"
+    proxy_exit = next(o for o in d["outbounds"] if o.get("tag") == "proxy-exit")
+    rs = proxy_exit["streamSettings"]["realitySettings"]
+    tcp = proxy_exit["streamSettings"]["tcpSettings"]
+    user = proxy_exit["settings"]["vnext"][0]["users"][0]
+    # TCP transport (required for vision flow)
+    assert proxy_exit["streamSettings"]["network"] == "tcp"
+    assert tcp["header"]["type"] == "none"
+    # Vision flow for stable REALITY (in user settings)
+    assert user["flow"] == "xtls-rprx-vision"
     assert rs["fingerprint"] == "firefox"
 
 
