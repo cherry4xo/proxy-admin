@@ -26,7 +26,15 @@ def _mock_upload(ssh_client: SSHClient, mocker):
 @pytest.fixture()
 def _mock_run(ssh_client: SSHClient, mocker):
     # Валидный конфиг: xray -test печатает "Configuration OK".
-    mocker.patch.object(ssh_client, "run_command", return_value=("Configuration OK", ""))
+    # systemctl is-active возвращает "active" после рестарта.
+    async def mock_run(cmd):
+        if "xray -test" in cmd:
+            return ("Configuration OK", "")
+        if "systemctl is-active" in cmd:
+            return ("active", "")
+        return ("", "")
+    
+    mocker.patch.object(ssh_client, "run_command", side_effect=mock_run)
 
 
 @pytest.mark.asyncio

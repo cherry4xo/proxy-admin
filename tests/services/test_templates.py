@@ -88,8 +88,10 @@ def test_exit_render_without_warp_uses_plain_freedom():
     # Без WARP — ни observatory, ни balancer.
     assert "observatory" not in d
     assert "balancers" not in d["routing"]
-    # fakedns убран из sniffing.
-    assert "fakedns" not in d["inbounds"][0]["sniffing"]["destOverride"]
+    # sniffing enabled с fakedns+quic для стабильности
+    assert d["inbounds"][0]["sniffing"]["enabled"] is True
+    assert "fakedns" in d["inbounds"][0]["sniffing"]["destOverride"]
+    assert "quic" in d["inbounds"][0]["sniffing"]["destOverride"]
 
 
 def test_exit_render_with_warp_adds_wireguard_balancer_observatory():

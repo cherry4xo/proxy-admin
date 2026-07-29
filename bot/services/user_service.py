@@ -51,6 +51,7 @@ class UserService:
             f"fp={settings.FINGERPRINT}",
             f"pbk={x25519_public}",
             f"sid={first_short_id}",
+            "flow=xtls-rprx-vision",  # Vision flow for stable REALITY connection
             "spx=%2F",  # spiderX=/ — улучшает мимикрию REALITY-handshake
             "type=xhttp",
             f"path={quote(xhttp_path)}",

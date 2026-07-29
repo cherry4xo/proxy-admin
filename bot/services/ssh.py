@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import asyncssh
@@ -258,7 +259,18 @@ class SSHClient:
         stdout, stderr = await self.run_command(_SYSTEMD_RESTART_CMD)
         logger.info("Xray restart on %s: %s %s", self._host, stdout.strip(), stderr.strip())
 
-        # 5. Чистим бэкап после успеха.
+        # 5. Проверка что Xray действительно поднялся (ждем до 10 сек).
+        for attempt in range(5):
+            await asyncio.sleep(2)
+            status_out, _ = await self.run_command("systemctl is-active xray || true")
+            if status_out.strip() == "active":
+                logger.info("Xray successfully started on %s", self._host)
+                break
+        else:
+            # Xray не поднялся после 5 попыток
+            raise RuntimeError(f"Xray failed to start on {self._host} after restart")
+
+        # 6. Чистим бэкап после успеха.
         await self.run_command(f"rm -f {backup_path}")
 
     async def restart_xray(self) -> str:

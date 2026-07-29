@@ -30,11 +30,33 @@ logger = logging.getLogger(__name__)
 # Default SNI pool with diverse, high-reputation domains
 # Criteria: TLS 1.3 + H2 support, global CDN, low block probability
 DEFAULT_SNI_POOL = [
-    "dl.google.com",           # Google (excellent TLS, rarely blocked)
-    "www.microsoft.com",       # Microsoft (enterprise-grade)
-    "cdn.apple.com",           # Apple (global CDN)
-    "www.amazon.com",          # Amazon (multi-region)
-    "www.cloudflare.com",      # Cloudflare (CDN + security)
+    # Google (excellent TLS, rarely blocked)
+    "dl.google.com",
+    "www.google.com",
+    "encrypted.google.com",
+    # Microsoft (enterprise-grade)
+    "www.microsoft.com",
+    "update.microsoft.com",
+    "download.microsoft.com",
+    # Apple (global CDN)
+    "cdn.apple.com",
+    "www.apple.com",
+    "updates.cdn-apple.com",
+    # Amazon (multi-region)
+    "www.amazon.com",
+    "amazon.com",
+    # Cloudflare (CDN + security)
+    "www.cloudflare.com",
+    "one.cloudflare.com",
+    "cdn.cloudflare.com",
+    # Other high-reputation CDNs
+    "cdn.jsdelivr.net",
+    "www.fastly.com",
+    "cdn.mozilla.net",
+    "www.shopify.com",
+    "cdn.shopify.com",
+    "www.github.com",
+    "github.com",
 ]
 
 
@@ -187,31 +209,48 @@ class SNIRotationService:
                         "message": f"Rotation not due yet ({remaining:.0f} minutes remaining)"
                     }
 
-            # Check health of current SNI first
+            # Check health of ALL SNI candidates (including current)
             current_sni = self._get_current_sni(node)
-            current_health = await self.check_tls_health(current_sni)
-
-            # Find next healthy SNI in pool
-            old_index = node.current_sni_index or 0
+            old_index = node.current_sni_index if node.current_sni_index is not None else 0
+            health_checks = []
+            
+            # Check all candidates starting from next, then wrap to current
+            # This ensures we find the healthiest SNI, not just "next in line"
+            checked_indices = []
+            for i in range(len(pool)):
+                idx = (old_index + i + 1) % len(pool)
+                checked_indices.append(idx)
+            
+            # Also check current SNI last (to compare)
+            checked_indices.append(old_index)
+            
             new_index = old_index
             new_sni = current_sni
-            health_checks = []
-
-            for attempt in range(len(pool)):
-                candidate_idx = (old_index + attempt + 1) % len(pool)
+            
+            for candidate_idx in checked_indices:
                 candidate_sni = pool[candidate_idx]
                 health = await self.check_tls_health(candidate_sni)
                 health_checks.append({"domain": candidate_sni, **health})
 
-                if health["healthy"]:
+                if health["healthy"] and candidate_idx != old_index:
+                    # Found healthy alternative different from current
                     new_index = candidate_idx
                     new_sni = candidate_sni
                     break
             else:
-                # All candidates failed - keep current
+                # No better alternative found - check if current is still healthy
+                if not any(h["domain"] == current_sni and h["healthy"] for h in health_checks):
+                    # Current SNI is unhealthy but no alternatives - fail
+                    return {
+                        "success": False,
+                        "error": "All SNI candidates failed health check (including current)",
+                        "health_checks": health_checks
+                    }
+                # Current is still OK - no rotation needed
                 return {
-                    "success": False,
-                    "error": "All SNI candidates failed health check",
+                    "success": True,
+                    "skipped": True,
+                    "message": "Current SNI is healthy, no rotation needed",
                     "health_checks": health_checks
                 }
 

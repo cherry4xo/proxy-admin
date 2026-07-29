@@ -21,7 +21,7 @@
       "settings": {
         "clients": [
           {% for c in clients %}
-          {"id": "{{ c.uuid }}", "flow": "", "email": "{{ c.uuid }}"}{% if not loop.last %},{% endif %}
+          {"id": "{{ c.uuid }}", "flow": "xtls-rprx-vision", "email": "{{ c.uuid }}"}{% if not loop.last %},{% endif %}
           {% endfor %}
         ],
         "decryption": "none"
@@ -45,7 +45,7 @@
       },
       "sniffing": {
         "enabled": true,
-        "destOverride": ["http", "tls", "quic"],
+        "destOverride": ["http", "tls", "fakedns", "quic"],
         "routeOnly": true
       }
     }
@@ -77,7 +77,8 @@
           "fingerprint": "{{ fingerprint }}",
           "publicKey": "{{ x25519_public }}",
           "shortId": "{{ short_id }}",
-          "spiderX": "/"
+          "spiderX": "/",
+          "flow": "xtls-rprx-vision"
         },
         "xhttpSettings": {
           "path": "{{ xhttp_path }}",
