@@ -22,6 +22,9 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="🔧 Bridge: настроить домен", callback_data="node:bridge_domain"),
     )
     builder.row(
+        InlineKeyboardButton(text="🌐 Exit: настроить домен", callback_data="node:exit_domain"),
+    )
+    builder.row(
         InlineKeyboardButton(text="🔄 Пересоздать Bridge (смена IP)", callback_data="node:recreate_bridge"),
         InlineKeyboardButton(text="❌ Удалить ноду", callback_data="node:delete"),
     )

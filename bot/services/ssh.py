@@ -51,6 +51,42 @@ systemctl reload nginx || systemctl restart nginx
 echo "NGINX_TLS_DONE"
 """
 
+# Nginx на exit как реальный TLS-таргет для REALITY dest (127.0.0.1:8443).
+# Серт приходит готовым (раскладывается ботом), certbot тут НЕ запускается.
+_EXIT_NGINX_SCRIPT = """\
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+DOMAIN="{domain}"
+CERT_DIR="{tls_dir}/${{DOMAIN}}"
+
+apt-get update -y -q
+apt-get install -y -q nginx
+
+test -f "${{CERT_DIR}}/fullchain.pem"
+test -f "${{CERT_DIR}}/privkey.pem"
+
+cat > /etc/nginx/sites-available/reality-${{DOMAIN}}.conf << EOF
+server {{
+    listen 127.0.0.1:8443 ssl http2;
+    server_name ${{DOMAIN}};
+    ssl_certificate     ${{CERT_DIR}}/fullchain.pem;
+    ssl_certificate_key ${{CERT_DIR}}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    location / {{
+        default_type text/html;
+        return 200 '<!doctype html><title>${{DOMAIN}}</title><h1>${{DOMAIN}}</h1>';
+    }}
+}}
+EOF
+ln -sf /etc/nginx/sites-available/reality-${{DOMAIN}}.conf /etc/nginx/sites-enabled/reality-${{DOMAIN}}.conf
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+systemctl enable nginx
+systemctl reload nginx || systemctl restart nginx
+echo "NGINX_TLS_DONE"
+"""
+
 # Генерация Cloudflare WARP-профиля на ноде через wgcf (один статический бинарь).
 # Печатает поля парсимо для бота; reserved вычисляется ботом из client_id (base64 → 3 байта).
 _WARP_SETUP_SCRIPT = """\
@@ -292,4 +328,12 @@ class SSHClient:
         if "NGINX_TLS_DONE" not in stdout:
             raise RuntimeError(f"Bridge nginx setup failed:\n{stderr or stdout}")
         logger.info("Bridge nginx (%s) ready on %s", domain, self._host)
+        return stdout
+
+    async def setup_exit_nginx(self, domain: str) -> str:
+        script = _EXIT_NGINX_SCRIPT.format(domain=domain, tls_dir=_TLS_DIR)
+        stdout, stderr = await self.run_command(script)
+        if "NGINX_TLS_DONE" not in stdout:
+            raise RuntimeError(f"Exit nginx setup failed:\n{stderr or stdout}")
+        logger.info("Exit nginx (%s) ready on %s", domain, self._host)
         return stdout

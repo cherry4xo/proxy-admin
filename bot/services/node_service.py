@@ -299,6 +299,7 @@ class NodeService:
                 warp_secret_key=warp_secret,
                 warp_address=(node.warp_address or "").split(",") if node.warp_address else [],
                 warp_reserved=node.warp_reserved or "0,0,0",
+                reality_domain=node.reality_domain,
             )
         else:
             async with self._session_factory() as session:
@@ -375,6 +376,17 @@ class NodeService:
         await ssh.deploy_tls_cert(fullchain, privkey, domain)
         await ssh.setup_bridge_nginx(domain)
 
+    async def _provision_exit_tls(self, ssh: SSHClient, domain: str) -> None:
+        """Выпустить (или взять кэш) общий серт домена и развернуть nginx :8443 на exit.
+
+        Требует cert_service. Бросает исключение при ошибке (ACME/nginx).
+        """
+        if not self._cert_service:
+            raise RuntimeError("CertService not configured — cannot provision domain TLS")
+        fullchain, privkey = await self._cert_service.ensure_cert(domain)
+        await ssh.deploy_tls_cert(fullchain, privkey, domain)
+        await ssh.setup_exit_nginx(domain)
+
     async def migrate_bridge_to_domain(self, bridge_node_id: int, reality_domain: str) -> Node:
         """Перевести существующий bridge на маскировку под свой домен.
 
@@ -404,6 +416,38 @@ class NodeService:
 
         await self.redeploy_node(bridge_node_id)
         node = await self.get_node(bridge_node_id)
+        assert node is not None
+        return node
+
+    async def migrate_exit_to_domain(self, exit_node_id: int, reality_domain: str) -> Node:
+        """Перевести существующий exit на маскировку под свой домен.
+
+        nginx+cert ставятся ДО смены конфига; при ошибке пробрасываем исключение,
+        нода остаётся в текущем (легаси) рабочем состоянии, БД не трогаем.
+        """
+        async with self._session_factory() as session:
+            result = await session.execute(select(Node).where(Node.id == exit_node_id))
+            node = result.scalar_one_or_none()
+            if not node or node.role != "exit":
+                raise ValueError(f"Exit node {exit_node_id} not found")
+            if not node.ip:
+                raise ValueError(f"Exit node {exit_node_id} has no IP")
+            key_result = await session.execute(select(SSHKey).where(SSHKey.id == node.ssh_key_id))
+            ssh_key = key_result.scalar_one()
+
+        ssh = self._make_ssh_client(node, ssh_key)
+        await self._provision_exit_tls(ssh, reality_domain)
+
+        async with self._session_factory() as session:
+            node = (
+                await session.execute(select(Node).where(Node.id == exit_node_id))
+            ).scalar_one()
+            node.reality_domain = reality_domain
+            node.reality_sni = reality_domain
+            await session.commit()
+
+        await self.redeploy_node(exit_node_id)
+        node = await self.get_node(exit_node_id)
         assert node is not None
         return node
 
@@ -530,6 +574,7 @@ class NodeService:
             reality_sni=sni,
             xray_api_port=settings.XRAY_API_PORT,
             xhttp_host=settings.XHTTP_HOST,
+            reality_domain=node.reality_domain,
         )
         await ssh.deploy_xray_config(config_json, xray_runtime=settings.XRAY_RUNTIME)
 

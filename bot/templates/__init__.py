@@ -26,6 +26,8 @@ def render_exit_node_config(
     warp_secret_key: str = "",
     warp_address: list[str] | None = None,
     warp_reserved: str = "0,0,0",
+    # Домен-режим: если задан reality_domain — dest=локальный nginx:8443.
+    reality_domain: str | None = None,
 ) -> str:
     tpl = _env.get_template("exit_node.json.j2")
     # xhttp_host: явный параметр > SNI (для XHTTP: host должен совпадать с SNI)
@@ -42,6 +44,7 @@ def render_exit_node_config(
         warp_secret_key=warp_secret_key,
         warp_address=warp_address or [],
         warp_reserved=warp_reserved or "0,0,0",
+        reality_domain=reality_domain,
     )
 
 

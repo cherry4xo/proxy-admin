@@ -34,6 +34,11 @@ class BridgeDomainFSM(StatesGroup):
     reality_domain = State()
 
 
+class ExitDomainFSM(StatesGroup):
+    node_id = State()
+    reality_domain = State()
+
+
 class UploadCertFSM(StatesGroup):
     domain = State()
     fullchain = State()
@@ -436,6 +441,75 @@ async def fsm_bridge_domain_value(message: Message, state: FSMContext, deps: Dep
         )
     except Exception as e:
         logger.exception("Failed to migrate bridge %d to domain", node_id)
+        await message.answer(
+            f"Ошибка миграции:\n<code>{e}</code>\n\n"
+            "Нода осталась в прежнем состоянии. Если нет сертификата — сначала загрузи его "
+            "(«📜 Загрузить сертификат»).",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(F.data == "node:exit_domain")
+async def cb_exit_domain_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        "Введите ID Exit Node (из БД), которую перевести на свой домен:",
+        reply_markup=back_keyboard(),
+    )
+    await state.set_state(ExitDomainFSM.node_id)
+    await callback.answer()
+
+
+@router.message(ExitDomainFSM.node_id)
+async def fsm_exit_domain_node_id(message: Message, state: FSMContext, deps: Deps) -> None:
+    try:
+        node_id = int(message.text or "")
+    except ValueError:
+        await message.answer("Введите числовой ID:")
+        return
+
+    node = await deps.node_service.get_node(node_id)
+    if not node or node.role != "exit":
+        await message.answer("Exit нода не найдена.", reply_markup=back_keyboard())
+        await state.clear()
+        return
+
+    await state.update_data(node_id=node_id)
+    await message.answer(
+        f"Exit <b>{node.name}</b> (<code>{node.ip}</code>).\n\n"
+        "Введите домен (A-запись уже должна вести на этот IP), напр. <code>exit1.cherry4xo.ru</code>:",
+        reply_markup=back_keyboard(),
+        parse_mode="HTML",
+    )
+    await state.set_state(ExitDomainFSM.reality_domain)
+
+
+@router.message(ExitDomainFSM.reality_domain)
+async def fsm_exit_domain_value(message: Message, state: FSMContext, deps: Deps) -> None:
+    domain = (message.text or "").strip()
+    data = await state.get_data()
+    node_id = data["node_id"]
+    await state.clear()
+
+    if not domain:
+        await message.answer("Пустой домен.", reply_markup=back_keyboard())
+        return
+
+    await message.answer(
+        f"Ставлю nginx+Let's Encrypt и переключаю REALITY на <code>{domain}</code>...\n"
+        "Это займёт ~1 минуту.",
+        parse_mode="HTML",
+    )
+    try:
+        node = await deps.node_service.migrate_exit_to_domain(node_id, domain)
+        await message.answer(
+            f"Exit <b>{node.name}</b> переведён на домен <code>{node.reality_sni}</code>.\n"
+            "Клиентские конфиги (прямые → Exit) теперь используют этот SNI.",
+            reply_markup=back_keyboard(),
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        logger.exception("Failed to migrate exit %d to domain", node_id)
         await message.answer(
             f"Ошибка миграции:\n<code>{e}</code>\n\n"
             "Нода осталась в прежнем состоянии. Если нет сертификата — сначала загрузи его "

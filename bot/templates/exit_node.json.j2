@@ -4,11 +4,9 @@
   },
   "dns": {
     "servers": [
-      {
-        "address": "https://1.1.1.1/dns-query",
-        "domains": ["geosite:geolocation-!cn"]
-      },
+      "1.1.1.1",
       "8.8.8.8",
+      "9.9.9.9",
       "localhost"
     ]
   },
@@ -30,7 +28,11 @@
         "security": "reality",
         "realitySettings": {
           "show": false,
+{% if reality_domain %}
+          "dest": "127.0.0.1:8443",
+{% else %}
           "dest": "{{ reality_sni }}:443",
+{% endif %}
           "xver": 0,
           "serverNames": ["{{ reality_sni }}"],
           "privateKey": "{{ x25519_private }}",
